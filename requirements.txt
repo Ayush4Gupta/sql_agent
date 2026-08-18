@@ -1,0 +1,14 @@
+langchain_community==0.4.1
+langchain_core==1.2.24
+langgraph
+python-dotenv
+requests
+fastapi
+uvicorn[standard]
+pydantic
+pyodbc
+langchain-openai
+sqlalchemy
+pyyaml
+duckdb
+duckdb-engine

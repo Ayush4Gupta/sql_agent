@@ -1,0 +1,58 @@
+# ── Credentials / secrets ─────────────────────────────────────────────────────
+.env
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Jupyter notebooks (outputs only — keep .ipynb but ignore checkpoints) ─────
+.ipynb_checkpoints/
+
+# ── Database files ────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+sql_agent/database/old data used/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── OS files ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── VS Code ───────────────────────────────────────────────────────────────────
+.vscode/
+extras/
+
+# ── pytest / coverage ─────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── mypy / ruff / linting ─────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+
+# Client-specific profile (contains proprietary business rules)
+profiles/client/
+
+
+# Generated benchmark databases
+*.duckdb
+*.duckdb.wal
+

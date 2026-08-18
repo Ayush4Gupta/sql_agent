@@ -1,0 +1,10 @@
+# TPC-DS benchmark profile
+profile_name: tpcds
+display_name: "TPC-DS Benchmark"
+
+# Database backend
+db_backend: duckdb
+db_path: "tpcds_sf1.duckdb"
+
+# No table prefix for TPC-DS
+table_prefix: ""
