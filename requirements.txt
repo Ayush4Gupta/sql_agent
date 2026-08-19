@@ -8,6 +8,8 @@ uvicorn[standard]
 pydantic
 pyodbc
 langchain-openai
+langchain-google-genai   # optional: LLM_PROVIDER=gemini
+langchain-groq           # optional: LLM_PROVIDER=groq
 sqlalchemy
 pyyaml
 duckdb

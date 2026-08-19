@@ -76,7 +76,7 @@ def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
 # ── schema_analysis node ──────────────────────────────────────────────────────
 
 def create_schema_analysis_node(llm, db_context: str = ""):
-    llm_structured = llm.with_structured_output(SchemaDecision, method="json_mode")
+    llm_structured = llm.with_structured_output(SchemaDecision)
     # Build once at node creation — db_context is static (built at startup)
     system_msg = SystemMessage(content=schema_analysis_prompt(db_context=db_context))
     def schema_analysis(state):

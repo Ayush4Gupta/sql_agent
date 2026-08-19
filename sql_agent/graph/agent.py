@@ -4,7 +4,7 @@ from typing import Annotated
 from sql_agent.knowledge.db_analyzer import build_db_context
 from sql_agent.knowledge.knowledge_loader import load_examples
 
-from langchain_openai import AzureChatOpenAI
+from sql_agent.config.llm_factory import get_llm
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
@@ -12,14 +12,7 @@ from langgraph.graph.message import add_messages
 
 import time
 
-from sql_agent.config.settings import (
-    AZURE_OPENAI_API_KEY,
-    AZURE_OPENAI_ENDPOINT,
-    AZURE_OPENAI_DEPLOYMENT,
-    AZURE_OPENAI_API_VERSION,
-    AZURE_OPENAI_TEMPERATURE,
-    MAX_SCHEMA_ITERATIONS,
-)
+from sql_agent.config.settings import MAX_SCHEMA_ITERATIONS
 logger = logging.getLogger(__name__)
 from sql_agent.database.db import get_db
 from sql_agent.nodes.list_tables import create_list_tables_node
@@ -46,9 +39,7 @@ class AgentState(MessagesState):
 
 def build_agent():
     logger.info(
-        "Building agent — deployment: %s, temperature: %s, max_schema_iterations: %s",
-        AZURE_OPENAI_DEPLOYMENT,
-        AZURE_OPENAI_TEMPERATURE,
+        "Building agent — max_schema_iterations: %s",
         MAX_SCHEMA_ITERATIONS,
     )
 
@@ -61,14 +52,8 @@ def build_agent():
     # Load verified examples (Layer 3)
     examples = load_examples()
 
-    llm = AzureChatOpenAI(
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        azure_deployment=AZURE_OPENAI_DEPLOYMENT,
-        api_key=AZURE_OPENAI_API_KEY,
-        api_version=AZURE_OPENAI_API_VERSION,
-        temperature=AZURE_OPENAI_TEMPERATURE,
-    )
-    logger.debug("AzureChatOpenAI LLM initialised with deployment: %s", AZURE_OPENAI_DEPLOYMENT)
+    # Provider-agnostic LLM — controlled by LLM_PROVIDER env var
+    llm = get_llm()
 
     tools = get_sql_tools(db=db, llm=llm)
     tool_map = split_sql_tools(tools)
