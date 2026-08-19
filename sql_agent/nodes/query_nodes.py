@@ -17,26 +17,58 @@ def create_run_query_node(db, run_query_tool):
     Behaviour
     ---------
     1. Reads the SQL from the last message's tool_call (set by check_query).
-    2. Runs db.run(sql)  →  string  →  ToolMessage content for the LLM  (unchanged).
-    3. Also executes the same SQL through the engine to capture
-       {"columns": [...], "rows": [[...], ...]} into state["raw_results"].
-    4. Falls back gracefully: if structured capture fails, the string result
-       is still returned to the LLM so the agent can finish normally.
+    2. Executes the SQL **once** through the engine.
+    3. Hard-caps the fetched rows at ``row_limit`` (from state, default 20) via
+       ``fetchmany`` — this is a defense-in-depth guarantee that prevents
+       unbounded result sets regardless of whether the LLM included a LIMIT
+       clause.  On TPC-DS ``store_sales`` (~2.9M rows) an omitted LIMIT would
+       otherwise pull the entire table into memory.
+    4. Derives both the plain-string ToolMessage (for the LLM) and the
+       structured ``{columns, rows}`` dict (for the UI) from the single fetch.
+    5. Falls back gracefully on execution errors.
     """
     def run_query(state):
         last_message = state["messages"][-1]
         tool_call    = last_message.tool_calls[0]
         sql          = tool_call["args"]["query"]
         tool_call_id = tool_call["id"]
+        row_limit    = state.get("row_limit") or 20
 
-        logger.info("[run_query] Executing SQL: %s", sql)
+        logger.info("[run_query] Executing SQL (row_limit=%d): %s", row_limit, sql)
 
-        # ── 1. String result for the LLM ──────────────────────────────────────
+        structured: dict = {"columns": [], "rows": []}
+        result_str = ""
+
         try:
-            result_str = db.run(sql)
+            with db._engine.connect() as conn:
+                cursor  = conn.execute(text(sql))
+                columns = list(cursor.keys())
+
+                # Hard-cap: fetch at most row_limit rows regardless of query
+                raw_rows  = cursor.fetchmany(row_limit)
+                rows      = [list(row) for row in raw_rows]
+                truncated = len(rows) == row_limit and cursor.fetchone() is not None
+
+                structured = {"columns": columns, "rows": rows}
+
+                # Build the string representation the LLM receives
+                # (mirrors what LangChain's db.run() produces)
+                result_str = str([dict(zip(columns, row)) for row in rows])
+
+                if truncated:
+                    result_str += f"\n[Results truncated to {row_limit} rows]"
+                    logger.info(
+                        "[run_query] Result truncated to %d rows (query returned more)",
+                        row_limit,
+                    )
+                else:
+                    logger.info(
+                        "[run_query] Captured %d rows × %d columns",
+                        len(rows), len(columns),
+                    )
         except Exception as exc:
-            result_str = f"Error executing query: {exc}"
-            logger.error("[run_query] db.run failed: %s", exc)
+            result_str = f"Error executing query: {sanitize_error(exc, context='run_query')}"
+            logger.error("[run_query] Execution failed: %s", exc)
 
         tool_message = ToolMessage(
             content=result_str,
@@ -44,28 +76,13 @@ def create_run_query_node(db, run_query_tool):
             name="sql_db_query",
         )
 
-        # ── 2. Structured result for the UI ───────────────────────────────────
-        structured: dict = {"columns": [], "rows": []}
-        try:
-            with db._engine.connect() as conn:
-                cursor  = conn.execute(text(sql))
-                columns = list(cursor.keys())
-                rows    = [list(row) for row in cursor.fetchall()]
-                structured = {"columns": columns, "rows": rows}
-                logger.info(
-                    "[run_query] Captured %d rows × %d columns for UI table",
-                    len(rows), len(columns),
-                )
-        except Exception as exc:
-            # Non-fatal — LLM still gets its string result; UI table is simply skipped
-            sanitize_error(exc, context="run_query.structured_capture")
-        
         return {
             "messages":   [tool_message],
             "raw_results": structured,
         }
 
     return run_query
+
 
 
 # ── generate_query node ────────────────────────────────────────────────────────
