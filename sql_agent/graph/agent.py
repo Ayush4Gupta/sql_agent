@@ -1,5 +1,5 @@
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from sql_agent.knowledge.db_analyzer import build_db_context
 from sql_agent.knowledge.knowledge_loader import load_examples
@@ -28,11 +28,19 @@ from sql_agent.tools.sql_tools import get_sql_tools, split_sql_tools
 
 # ── Extended State ─────────────────────────────────────────────────────────────
 
+def _merge_timings(existing: dict | None, new: dict | None) -> dict:
+    """Reducer: merge node-timing dicts so each node appends its entry."""
+    merged = dict(existing or {})
+    merged.update(new or {})
+    return merged
+
+
 class AgentState(MessagesState):
-    schema_iterations: int        # how many schema fetches have run (starts at 0)
-    retrieved_tables: list[str]   # table names whose schemas are in context
-    raw_results: dict             # ← NEW: {"columns": [...], "rows": [[...], ...]}
-    row_limit: int                # ← NEW: max rows to return (default 20)
+    schema_iterations: int                                          # how many schema fetches have run
+    retrieved_tables: list[str]                                     # table names whose schemas are in context
+    raw_results: dict                                               # {"columns": [...], "rows": [[...], ...]}
+    row_limit: int                                                  # max rows to return (default 20)
+    node_timings: Annotated[dict[str, float], _merge_timings]       # {node_name: elapsed_seconds}
 
 
 # ── Agent Builder ──────────────────────────────────────────────────────────────
@@ -143,11 +151,17 @@ def build_agent():
         return "generate_query"
     
     def timed(name, fn):
+        """Wrap a node function to record wall-clock elapsed time into state."""
         def wrapper(state):
             t0 = time.perf_counter()
             # ToolNode (LangChain Runnable) uses .invoke(); plain functions use fn(state)
             result = fn.invoke(state) if hasattr(fn, "invoke") else fn(state)
-            logger.info("[TIMING] %s → %.3fs", name, time.perf_counter() - t0)
+            elapsed = round(time.perf_counter() - t0, 3)
+            logger.info("[TIMING] %s → %.3fs", name, elapsed)
+
+            # Inject timing into the state update dict so it accumulates
+            if isinstance(result, dict):
+                result["node_timings"] = {name: elapsed}
             return result
         return wrapper
 

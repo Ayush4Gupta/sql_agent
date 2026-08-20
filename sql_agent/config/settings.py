@@ -40,6 +40,9 @@ logger.info(
     AGENT_PROFILE, DB_BACKEND, DB_PATH,
 )
 
+# ── LLM provider ──────────────────────────────────────────────────────────────
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure").lower().strip()
+
 # ── Azure OpenAI ──────────────────────────────────────────────────────────────
 AZURE_OPENAI_API_KEY      = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT     = os.getenv("AZURE_OPENAI_ENDPOINT", "")

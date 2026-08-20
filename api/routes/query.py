@@ -31,6 +31,7 @@ async def execute_query(request: QueryRequest):
         "POST /query — question: %s | row_limit: %d",
         request.question,
         ROW_LIMIT,  # ← Changed from request.row_limit
+            "node_timings":      {},
     )
     try:
         inputs = {
@@ -39,6 +40,7 @@ async def execute_query(request: QueryRequest):
             "retrieved_tables":  [],
             "raw_results":       {},       # ← NEW: will be populated by run_query node
             "row_limit":         ROW_LIMIT,   # ← NEW: carried through graph state
+            "node_timings":      {},
         }
 
         messages      = []
@@ -96,11 +98,20 @@ async def execute_query(request: QueryRequest):
             step_num,
             len(final_answer),
         )
+        # Extract node timings from final state
+        node_timings = None
+        if final_state:
+            timings = final_state.get("node_timings") or {}
+            if timings:
+                node_timings = timings
+                logger.info("POST /query node_timings: %s", timings)
+
         return QueryResponse(
             question=request.question,
             messages=messages,
             final_answer=final_answer,
-            table_data=table_data,        # ← NEW: None-safe, frontend checks before rendering
+            table_data=table_data,
+            node_timings=node_timings,
         )
 
     # except Exception as e:

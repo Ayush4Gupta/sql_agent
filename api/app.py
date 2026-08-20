@@ -4,7 +4,7 @@ import pathlib
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 
-from api.routes import health, query, database, graph
+from api.routes import health, query, database, graph, config
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ app.include_router(health.router)
 app.include_router(query.router)
 app.include_router(database.router)
 app.include_router(graph.router)
+app.include_router(config.router)
 
 
 # ── Frontend ───────────────────────────────────────────────────────────────────
