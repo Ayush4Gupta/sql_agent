@@ -6,7 +6,6 @@ from api.dependencies import agent
 from api.schemas import QueryRequest, QueryResponse, TableData
 
 from sql_agent.config.settings import ROW_LIMIT
-
 from sql_agent.utils.error_sanitizer import sanitize_error
 
 router = APIRouter(tags=["query"])
@@ -28,34 +27,33 @@ async def execute_query(request: QueryRequest):
     Row limit is configured via ROW_LIMIT in .env (default 20).
     """
     logger.info(
-        "POST /query — question: %s | row_limit: %d",
+        "POST /query -> question: %s | row_limit: %d",
         request.question,
-        ROW_LIMIT,  # ← Changed from request.row_limit
-            "node_timings":      {},
+        ROW_LIMIT,
     )
     try:
         inputs = {
-            "messages":         [{"role": "user", "content": request.question}],
+            "messages":          [{"role": "user", "content": request.question}],
             "schema_iterations": 0,
             "retrieved_tables":  [],
-            "raw_results":       {},       # ← NEW: will be populated by run_query node
-            "row_limit":         ROW_LIMIT,   # ← NEW: carried through graph state
+            "raw_results":       {},
+            "row_limit":         ROW_LIMIT,
             "node_timings":      {},
         }
 
         messages      = []
         final_answer  = ""
         step_num      = 0
-        final_state   = None              # ← NEW: keep reference to last graph state
+        final_state   = None
 
         for step in agent.stream(inputs, stream_mode="values"):
             step_num   += 1
-            final_state = step            # ← always update so we have the final state
+            final_state = step
 
             last_message = step["messages"][-1]
             msg_type     = getattr(last_message, "type", "unknown")
             logger.debug(
-                "  Stream step %d — type: %s, tool_calls: %s",
+                "  Stream step %d -> type: %s, tool_calls: %s",
                 step_num,
                 msg_type,
                 bool(getattr(last_message, "tool_calls", None)),
@@ -78,7 +76,7 @@ async def execute_query(request: QueryRequest):
             ):
                 final_answer = last_message.content
 
-        # ── Extract structured table data from final state ─────────────────────
+        # ── Extract structured table data from final state ────────────────────────────
         table_data: TableData | None = None
         if final_state:
             raw = final_state.get("raw_results") or {}
@@ -87,18 +85,19 @@ async def execute_query(request: QueryRequest):
             if cols and rows:
                 table_data = TableData(columns=cols, rows=rows)
                 logger.info(
-                    "POST /query — table_data: %d rows × %d cols",
+                    "POST /query -> table_data: %d rows x %d cols",
                     len(rows), len(cols),
                 )
             else:
-                logger.info("POST /query — no tabular data captured (aggregation or error)")
+                logger.info("POST /query -> no tabular data captured (aggregation or error)")
 
         logger.info(
-            "POST /query complete — %d stream steps, answer length: %d chars",
+            "POST /query complete -> %d stream steps, answer length: %d chars",
             step_num,
             len(final_answer),
         )
-        # Extract node timings from final state
+
+        # ── Extract node timings from final state ─────────────────────────────────────
         node_timings = None
         if final_state:
             timings = final_state.get("node_timings") or {}
@@ -114,9 +113,6 @@ async def execute_query(request: QueryRequest):
             node_timings=node_timings,
         )
 
-    # except Exception as e:
-    #     logger.exception("POST /query failed for question: %s", request.question)
-    #     raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
     except Exception as e:
         # sanitize_error already logs the full exception with an error_id
         safe_message = sanitize_error(e, context=f"POST /query | question: {request.question}")
