@@ -117,27 +117,15 @@ def check_query_system_prompt(dialect: str) -> str:
         extra_checks = f"\n{profile_check_rules}"
 
     return f"""
-You are a SQL expert with a strong attention to detail.
+You are a SQL validation expert.
 
-IMPORTANT GUARDRAIL:
-You must ONLY answer questions that can be answered using the tables and schema provided in the database context.
-If the question is general knowledge, trivia, or cannot be answered from the database, respond exactly with:
-Sorry, I can only answer questions based on the database.
-Do NOT attempt to answer questions using outside knowledge or facts not present in the database.
+Your task is to validate the candidate {dialect} SQL query before execution.
 
-Double-check the {dialect} query for common mistakes, including:
-- Using NOT IN with NULL values
-- Using UNION when UNION ALL should have been used
-- Using BETWEEN for exclusive ranges
-- Data type mismatch in predicates
-- Properly quoting identifiers
-- Using the correct number of arguments for functions
-- Casting to the correct data type
-- Using the proper columns for joins{extra_checks}
-If there are any mistakes, rewrite the query.
-If there are no mistakes, just reproduce the original query.
-
-You will call the appropriate tool to execute the query after running this check.
+RULES:
+1. Double-check for syntax errors, proper quoting, data type mismatches, or invalid {dialect} syntax.{extra_checks}
+2. DO NOT change the business intent of the query. NEVER replace the query with metadata, information_schema, or schema lookup queries.
+3. If the query is already correct, keep it EXACTLY as is.
+4. Always call the `sql_db_query` tool with the validated query.
 """.strip()
 
 

@@ -154,8 +154,6 @@ def create_generate_query_node(llm, run_query_tool, get_schema_tool,
     return generate_query
 
 
-# ── check_query node ───────────────────────────────────────────────────────────
-
 def create_check_query_node(llm, run_query_tool, system_prompt: str):
     def check_query(state):
         last_message = state["messages"][-1]
@@ -164,8 +162,17 @@ def create_check_query_node(llm, run_query_tool, system_prompt: str):
 
         logger.info("[check_query] Validating SQL query: %s", query)
 
+        # Extract user question for context
+        user_question = next(
+            (m["content"] if isinstance(m, dict) else m.content
+             for m in state["messages"]
+             if (isinstance(m, dict) and m.get("role") == "human")
+             or getattr(m, "type", None) == "human"),
+            ""
+        )
         system_message = {"role": "system", "content": system_prompt}
-        user_message   = {"role": "user",   "content": query}
+        user_content = f"User Question: {user_question}\n\nCandidate SQL Query to validate:\n```sql\n{query}\n```"
+        user_message   = {"role": "user",   "content": user_content}
 
         llm_with_tools = llm.bind_tools([run_query_tool], tool_choice="any")
         response       = llm_with_tools.invoke([system_message, user_message])
@@ -180,6 +187,8 @@ def create_check_query_node(llm, run_query_tool, system_prompt: str):
                 )
             else:
                 logger.debug("[check_query] Query passed validation unchanged")
+        else:
+            response = last_message
 
         response.id = last_message.id
         return {"messages": [response]}

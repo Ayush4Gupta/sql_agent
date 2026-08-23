@@ -76,16 +76,16 @@ def build_db_context(db: SQLDatabase) -> str:
     parts = []
     if relationships:
         parts.append("TABLE RELATIONSHIPS (auto-discovered join paths):")
-        for rel in relationships:
+        for rel in relationships[:15]:
             parts.append(f"  {rel}")
     if profiles:
-        parts.append("\nCOLUMN VALUE PROFILES (actual values from database):")
-        for line in profiles:
+        parts.append("\nCOLUMN VALUE PROFILES (sample distinct values):")
+        for line in profiles[:15]:
             parts.append(f"  {line}")
 
     result = "\n".join(parts)
-    logger.info("[db_analyzer] db_context built: %d relationships, %d profile lines",
-                len(relationships), len(profiles))
+    logger.info("[db_analyzer] db_context built: %d relationships, %d profile lines (capped)",
+                min(len(relationships), 15), min(len(profiles), 15))
     return result
 
 
