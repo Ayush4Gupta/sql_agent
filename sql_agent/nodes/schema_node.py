@@ -90,8 +90,23 @@ def create_schema_analysis_node(llm, db_context: str = ""):
         )
 
         try:
+            # Extract user question and retrieved schemas into a clean message (avoids tool-call format issues across providers)
+            user_question = next(
+                (m["content"] if isinstance(m, dict) else m.content
+                 for m in state["messages"]
+                 if (isinstance(m, dict) and m.get("role") == "human")
+                 or getattr(m, "type", None) == "human"),
+                ""
+            )
+            schema_snippets = [
+                m["content"] if isinstance(m, dict) else m.content
+                for m in state["messages"]
+                if (isinstance(m, dict) and m.get("role") == "tool")
+                or getattr(m, "type", None) == "tool"
+            ]
+            context_text = f"User Question: {user_question}\n\nRetrieved Table Schemas:\n" + "\n\n".join(schema_snippets)
             result: SchemaDecision = llm_structured.invoke(
-                [system_msg] + state["messages"]
+                [system_msg, {"role": "user", "content": context_text}]
             )
         except Exception as exc:
             logger.warning(

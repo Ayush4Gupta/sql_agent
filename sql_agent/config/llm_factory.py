@@ -115,7 +115,7 @@ def _build_groq():
     from langchain_groq import ChatGroq
 
     api_key     = os.getenv("GROQ_API_KEY", "")
-    model       = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model       = os.getenv("GROQ_MODEL") or os.getenv("GROQ_MODEL_NAME") or "openai/gpt-oss-120b"
     temperature = float(os.getenv("GROQ_TEMPERATURE", "0"))
 
     if not api_key:
