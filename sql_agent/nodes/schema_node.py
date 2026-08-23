@@ -19,7 +19,12 @@ class SchemaDecision(BaseModel):
 
 # ── call_get_schema node ──────────────────────────────────────────────────────
 
-def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
+def create_call_get_schema_node(llm, get_schema_tool, run_query_tool=None, db_context: str = ""):
+    tools = [get_schema_tool]
+    if run_query_tool:
+        tools.append(run_query_tool)
+    llm_with_tools = llm.bind_tools(tools)
+
     def call_get_schema(state):
         iteration = (state.get("schema_iterations") or 0) + 1
         already = set(state.get("retrieved_tables") or [])
@@ -29,15 +34,13 @@ def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
             sorted(already) if already else "(none)",
         )
 
-        llm_with_tools = llm.bind_tools([get_schema_tool])
         context_addition = f"\n\nDATABASE RELATIONSHIPS TO CONSIDER:\n{db_context}" if db_context else ""
         system_hint = {
             "role": "system",
             "content": (
-                "You are selecting database table schemas needed to answer a SQL question. "
-                "Select table schemas using the sql_db_schema tool (comma-separated table names). "
-                "Include dimension tables, date tables, and fact tables needed. "
-                "If the user input is a general greeting or conversational message that requires no database query, you may respond directly without calling any tool."
+                "You are selecting database table schemas needed to answer a SQL question.\n"
+                "Call the `sql_db_schema` tool with comma-separated table names to inspect relevant table definitions (e.g. `customer` or `item, store_sales`).\n"
+                "If the user message is a greeting or general conversational input, respond directly without calling tools."
                 + context_addition
             )
         }
@@ -46,9 +49,12 @@ def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
         # Track which tables are being requested
         new_tables = []
         if response.tool_calls:
-            raw = response.tool_calls[0]["args"].get("table_names", "")
-            new_tables = [t.strip() for t in raw.split(",") if t.strip()]
-            logger.info("[call_get_schema] LLM requested schemas for: %s", new_tables)
+            for tc in response.tool_calls:
+                if tc["name"] == "sql_db_schema":
+                    raw = tc["args"].get("table_names", "")
+                    new_tables.extend([t.strip() for t in raw.split(",") if t.strip()])
+            if new_tables:
+                logger.info("[call_get_schema] LLM requested schemas for: %s", new_tables)
         else:
             logger.warning("[call_get_schema] LLM made no tool call — no tables requested")
 
@@ -108,16 +114,36 @@ def create_schema_analysis_node(llm, db_context: str = ""):
                 [system_msg, {"role": "user", "content": context_text}]
             )
         except Exception as exc:
-            logger.warning(
-                "[schema_analysis] Structured output failed (%s) — "
-                "forcing ANALYSIS_COMPLETE to unblock pipeline",
-                exc,
-            )
-            result = SchemaDecision(
-                decision="ANALYSIS_COMPLETE",
-                tables_needed=[],
-                reasoning=f"Structured output parse failed: {exc}",
-            )
+            exc_str = str(exc)
+            parsed_decision = None
+            if "failed_generation" in exc_str or "decision" in exc_str:
+                import json
+                import re
+                match = re.search(r'\{.*\}', exc_str, re.DOTALL)
+                if match:
+                    try:
+                        data = json.loads(match.group(0))
+                        args = data.get("arguments", data)
+                        if isinstance(args, str):
+                            args = json.loads(args)
+                        if "decision" in args:
+                            parsed_decision = SchemaDecision(**args)
+                    except Exception:
+                        pass
+            if parsed_decision:
+                logger.info("[schema_analysis] Recovered decision from provider output: %s", parsed_decision.decision)
+                result = parsed_decision
+            else:
+                logger.warning(
+                    "[schema_analysis] Structured output failed (%s) — "
+                    "forcing ANALYSIS_COMPLETE to unblock pipeline",
+                    exc,
+                )
+                result = SchemaDecision(
+                    decision="ANALYSIS_COMPLETE",
+                    tables_needed=[],
+                    reasoning=f"Structured output parse fallback: {exc}",
+                )
 
         if result.decision == "ANALYSIS_COMPLETE":
             logger.info(
