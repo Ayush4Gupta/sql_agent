@@ -19,11 +19,8 @@ class SchemaDecision(BaseModel):
 
 # ── call_get_schema node ──────────────────────────────────────────────────────
 
-def create_call_get_schema_node(llm, get_schema_tool, run_query_tool=None, db_context: str = ""):
-    tools = [get_schema_tool]
-    if run_query_tool:
-        tools.append(run_query_tool)
-    llm_with_tools = llm.bind_tools(tools)
+def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
+    llm_with_tools = llm.bind_tools([get_schema_tool])
 
     def call_get_schema(state):
         iteration = (state.get("schema_iterations") or 0) + 1
@@ -49,12 +46,9 @@ def create_call_get_schema_node(llm, get_schema_tool, run_query_tool=None, db_co
         # Track which tables are being requested
         new_tables = []
         if response.tool_calls:
-            for tc in response.tool_calls:
-                if tc["name"] == "sql_db_schema":
-                    raw = tc["args"].get("table_names", "")
-                    new_tables.extend([t.strip() for t in raw.split(",") if t.strip()])
-            if new_tables:
-                logger.info("[call_get_schema] LLM requested schemas for: %s", new_tables)
+            raw = response.tool_calls[0]["args"].get("table_names", "")
+            new_tables = [t.strip() for t in raw.split(",") if t.strip()]
+            logger.info("[call_get_schema] LLM requested schemas for: %s", new_tables)
         else:
             logger.warning("[call_get_schema] LLM made no tool call — no tables requested")
 

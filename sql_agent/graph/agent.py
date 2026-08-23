@@ -78,12 +78,7 @@ def build_agent():
     run_query_node       = create_run_query_node(db=db, run_query_tool=run_query_tool)
 
     list_tables_node     = create_list_tables_node(list_tables_tool)
-    call_get_schema_node = create_call_get_schema_node(
-        llm,
-        get_schema_tool=get_schema_tool,
-        run_query_tool=run_query_tool,
-        db_context=db_context,
-    )
+    call_get_schema_node = create_call_get_schema_node(llm, get_schema_tool, db_context=db_context)
     schema_analysis_node = create_schema_analysis_node(llm, db_context=db_context)
     generate_query_node  = create_generate_query_node(
         llm=llm,
@@ -173,15 +168,8 @@ def build_agent():
     def route_call_get_schema(state: AgentState) -> str:
         last_message = state["messages"][-1]
         if getattr(last_message, "tool_calls", None):
-            first_tool = last_message.tool_calls[0]["name"]
-            if first_tool == "sql_db_query":
-                logger.info("[route_call_get_schema] SQL query tool called directly — routing to check_query")
-                return "check_query"
-            elif first_tool == "sql_db_schema":
-                logger.info("[route_call_get_schema] Schema tool called — routing to get_schema")
-                return "get_schema"
-            else:
-                return "get_schema"
+            logger.info("[route_call_get_schema] Tool call present — routing to get_schema")
+            return "get_schema"
         logger.info("[route_call_get_schema] No tool call made — routing to generate_query")
         return "generate_query"
 
@@ -195,7 +183,7 @@ def build_agent():
     builder.add_node("schema_analysis", timed("schema_analysis", schema_analysis_node))
     builder.add_node("generate_query",  timed("generate_query",  generate_query_node))
     builder.add_node("check_query",     timed("check_query",     check_query_node))
-    builder.add_node("run_query",       timed("run_query",       run_query_node))   # now a plain function node
+    builder.add_node("run_query",       timed("run_query",       run_query_node))
 
     builder.add_edge(START,              "list_tables")
     builder.add_edge("list_tables",      "call_get_schema")
@@ -204,7 +192,6 @@ def build_agent():
         route_call_get_schema,
         {
             "get_schema":     "get_schema",
-            "check_query":    "check_query",
             "generate_query": "generate_query",
         }
     )
