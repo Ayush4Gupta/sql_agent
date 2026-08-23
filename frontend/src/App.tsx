@@ -3,10 +3,9 @@ import { fetchConfig } from '@/hooks/useApi'
 import type { ConfigResponse } from '@/types/api'
 import Header from '@/components/Layout/Header'
 import QueryPanel from '@/components/QueryPanel/QueryPanel'
-import GraphView from '@/components/GraphView/GraphView'
 import DatabaseExplorer from '@/components/DatabaseExplorer/DatabaseExplorer'
 
-type Tab = 'query' | 'graph' | 'database'
+type Tab = 'query' | 'database'
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('query')
@@ -23,7 +22,6 @@ export default function App() {
       <Header config={config} activeTab={activeTab} onTabChange={setActiveTab} />
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
         {activeTab === 'query' && <QueryPanel />}
-        {activeTab === 'graph' && <GraphView />}
         {activeTab === 'database' && <DatabaseExplorer />}
       </main>
     </div>

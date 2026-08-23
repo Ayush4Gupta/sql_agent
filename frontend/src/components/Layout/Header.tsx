@@ -1,8 +1,8 @@
-import { Database, GitGraph, Search, Cpu } from 'lucide-react'
+import { Database, Search, Cpu } from 'lucide-react'
 import type { ConfigResponse } from '@/types/api'
 import { cn } from '@/lib/utils'
 
-type Tab = 'query' | 'graph' | 'database'
+type Tab = 'query' | 'database'
 
 interface HeaderProps {
   config: ConfigResponse | null
@@ -12,7 +12,6 @@ interface HeaderProps {
 
 const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: 'query', label: 'Query', icon: <Search className="w-4 h-4" /> },
-  { id: 'graph', label: 'Graph', icon: <GitGraph className="w-4 h-4" /> },
   { id: 'database', label: 'Database', icon: <Database className="w-4 h-4" /> },
 ]
 
@@ -39,7 +38,7 @@ export default function Header({ config, activeTab, onTabChange }: HeaderProps) 
                 key={tab.id}
                 onClick={() => onTabChange(tab.id)}
                 className={cn(
-                  'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200',
+                  'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 cursor-pointer',
                   activeTab === tab.id
                     ? 'bg-accent text-white shadow-lg shadow-accent/20'
                     : 'text-text-secondary hover:text-text-primary hover:bg-bg-card'
