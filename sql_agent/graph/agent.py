@@ -165,6 +165,14 @@ def build_agent():
             return result
         return wrapper
 
+    def route_call_get_schema(state: AgentState) -> str:
+        last_message = state["messages"][-1]
+        if getattr(last_message, "tool_calls", None):
+            logger.info("[route_call_get_schema] Tool calls present — routing to get_schema")
+            return "get_schema"
+        logger.info("[route_call_get_schema] No tool call made — routing to generate_query")
+        return "generate_query"
+
     # ── Graph ──────────────────────────────────────────────────────────────────
 
     builder = StateGraph(AgentState)
@@ -179,7 +187,14 @@ def build_agent():
 
     builder.add_edge(START,              "list_tables")
     builder.add_edge("list_tables",      "call_get_schema")
-    builder.add_edge("call_get_schema",  "get_schema")
+    builder.add_conditional_edges(
+        "call_get_schema",
+        route_call_get_schema,
+        {
+            "get_schema":     "get_schema",
+            "generate_query": "generate_query",
+        }
+    )
     builder.add_edge("get_schema",       "schema_analysis")
 
     builder.add_conditional_edges(

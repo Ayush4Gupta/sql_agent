@@ -29,16 +29,15 @@ def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
             sorted(already) if already else "(none)",
         )
 
-        llm_with_tools = llm.bind_tools([get_schema_tool], tool_choice="any")
+        llm_with_tools = llm.bind_tools([get_schema_tool])
         context_addition = f"\n\nDATABASE RELATIONSHIPS TO CONSIDER:\n{db_context}" if db_context else ""
         system_hint = {
             "role": "system",
             "content": (
                 "You are selecting database table schemas needed to answer a SQL question. "
-                "Be generous — select ALL tables that might be needed including dimension "
-                "tables (for readable values), date tables (for filtering), and any "
-                "fact tables involved in multi-step calculations. "
-                "You can request multiple tables in one call by comma-separating them."
+                "Select table schemas using the sql_db_schema tool (comma-separated table names). "
+                "Include dimension tables, date tables, and fact tables needed. "
+                "If the user input is a general greeting or conversational message that requires no database query, you may respond directly without calling any tool."
                 + context_addition
             )
         }
