@@ -35,9 +35,14 @@ def create_call_get_schema_node(llm, get_schema_tool, db_context: str = ""):
         system_hint = {
             "role": "system",
             "content": (
-                "You are selecting database table schemas needed to answer a SQL question.\n"
-                "Call the `sql_db_schema` tool with comma-separated table names to inspect relevant table definitions (e.g. `customer` or `item, store_sales`).\n"
-                "If the user message is a greeting or general conversational input, respond directly without calling tools."
+                "You are selecting which database table schemas need to be inspected "
+                "before a SQL query can be written.\n\n"
+                "Your ONLY tool is `sql_db_schema`. Call it with comma-separated table "
+                "names whose definitions you need to see (e.g. `customer` or "
+                "`item, store_sales`).\n\n"
+                "If you don't need to inspect a specific table's schema — for example "
+                "if the user's message is a greeting, a general question, or you already "
+                "have enough context — don't call any tool. Just respond directly."
                 + context_addition
             )
         }
