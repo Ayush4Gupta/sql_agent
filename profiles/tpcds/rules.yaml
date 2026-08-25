@@ -1,0 +1,351 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TPC-DS Business Rules for SQL Agent
+# Profile: tpcds
+#
+# These rules govern how the agent interprets business questions against the
+# TPC-DS schema. Each rule has a name and text that is injected into the
+# generate_query prompt as a MANDATORY QUERY RULE.
+#
+# For ambiguous rules, the canonical interpretation is noted in a comment.
+# The eval harness gold SQL will be written against these canonical picks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+rules:
+
+  # ── A. Sale Completion & Validity ──────────────────────────────────────────
+
+  - name: Valid Sale
+    text: |
+      A sale record is "valid" only when its sold-date surrogate key is NOT NULL:
+        - store_sales: ss_sold_date_sk IS NOT NULL
+        - catalog_sales: cs_sold_date_sk IS NOT NULL
+        - web_sales: ws_sold_date_sk IS NOT NULL
+      Records with NULL sold-date are incomplete/pending transactions. Exclude
+      them from ALL revenue, quantity, and count metrics.
+
+  - name: Identified Customer Sale
+    text: |
+      A valid sale (per the Valid Sale rule) where the customer is known:
+        - store_sales: ss_customer_sk IS NOT NULL
+        - catalog_sales: cs_bill_customer_sk IS NOT NULL
+        - web_sales: ws_bill_customer_sk IS NOT NULL
+      ~4.5% of store_sales have NULL customer (anonymous POS transactions).
+      Any per-customer metric (lifetime value, segmentation, repeat rate)
+      must exclude anonymous sales.
+      Depends on: Valid Sale.
+
+  # Canonical pick: interpretation (a) — net_paid only, no return offset.
+  # Rationale: "net sales" at the line-item level conventionally means the
+  # amount collected after discounts. Return adjustments belong in a separate
+  # "net revenue" metric at the reporting level (rule 27).
+  - name: Net Sale
+    text: |
+      "Net sales" for a line item means the amount actually collected after
+      discounts, excluding tax:
+        - store_sales: ss_net_paid
+        - catalog_sales: cs_net_paid
+        - web_sales: ws_net_paid
+      Do NOT subtract return amounts at the line-item level; return adjustments
+      are handled separately in reporting-level net revenue calculations.
+      Depends on: Valid Sale.
+
+  # ── B. Date & Period Definitions ───────────────────────────────────────────
+
+  - name: Sale Date
+    text: |
+      The date that defines "when a sale happened" for reporting is the SOLD
+      date, not the ship date or return date:
+        - store_sales: join ss_sold_date_sk to date_dim.d_date_sk
+        - catalog_sales: join cs_sold_date_sk to date_dim.d_date_sk
+        - web_sales: join ws_sold_date_sk to date_dim.d_date_sk
+      Always join to date_dim for date filtering; never filter on raw SK values.
+
+  - name: Monthly Period
+    text: |
+      "Monthly sales" means grouping by d_year and d_moy (month of year) from
+      date_dim, joined via the Sale Date rule. Do not truncate raw dates.
+      Depends on: Sale Date.
+
+  - name: Quarterly Period
+    text: |
+      "Quarterly" means grouping by d_year and d_qoy (quarter of year) from
+      date_dim, or equivalently d_quarter_name (e.g. '2002Q1').
+      Depends on: Sale Date.
+
+  - name: Fiscal Year
+    text: |
+      "Year" in a sales report uses the calendar year column d_year from
+      date_dim (not d_fy_year). Always use d_year for year-based grouping
+      and filtering.
+      Depends on: Sale Date.
+
+  # ── C. Channel Scope ──────────────────────────────────────────────────────
+
+  - name: Store Channel
+    text: |
+      Store sales channel uses the store_sales fact table, joined to the store
+      dimension via ss_store_sk = s_store_sk.
+
+  - name: Catalog Channel
+    text: |
+      Catalog sales channel uses the catalog_sales fact table.
+
+  - name: Web Channel
+    text: |
+      Web sales channel uses the web_sales fact table.
+
+  # Canonical pick: interpretation (b) — all three channels.
+  # Rationale: a business operating all three channels would define "total" as
+  # the union. This is also the interpretation an ungoverned LLM is least
+  # likely to get right consistently (it often defaults to store-only).
+  - name: Total Sales
+    text: |
+      "Total sales" or "all sales" means the UNION ALL of all three channels:
+      store_sales, catalog_sales, and web_sales. Never default to store-only.
+      When computing totals across channels, use UNION ALL with matching column
+      aliases for the metric columns (e.g. net_paid, quantity, sold_date_sk).
+      Depends on: Store Channel, Catalog Channel, Web Channel.
+
+  # ── D. Returns & Refunds ──────────────────────────────────────────────────
+
+  - name: Valid Return
+    text: |
+      A return record is valid when its returned-date SK is NOT NULL:
+        - store_returns: sr_returned_date_sk IS NOT NULL
+        - catalog_returns: cr_returned_date_sk IS NOT NULL
+        - web_returns: wr_returned_date_sk IS NOT NULL
+      Returns with NULL date are unprocessed/pending.
+
+  - name: Return Rate
+    text: |
+      Return rate = (number of returned items) / (number of sold items), per
+      channel. For store: COUNT(sr_item_sk) / COUNT(ss_item_sk) using a LEFT
+      JOIN from store_sales to store_returns on BOTH keys:
+        ss_item_sk = sr_item_sk AND ss_ticket_number = sr_ticket_number
+      The compound join is required — joining on item_sk alone inflates the
+      rate because different tickets can sell the same item.
+      Same pattern for catalog (cs_item_sk + cs_order_number = cr_item_sk +
+      cr_order_number) and web (ws_item_sk + ws_order_number = wr_item_sk +
+      wr_order_number).
+      Depends on: Valid Sale, Valid Return.
+
+  - name: Defective Return
+    text: |
+      A return where the reason indicates a product defect. Join the return's
+      reason SK (sr_reason_sk / cr_reason_sk / wr_reason_sk) to the reason
+      table and filter:
+        r_reason_desc IN ('Package was damaged', 'Stopped working',
+                          'Parts missing', 'Not working any more')
+      All other reason codes (wrong size, gift exchange, didn't like color,
+      etc.) are non-defect returns.
+      Depends on: Valid Return.
+
+  # Canonical pick: interpretation (c) — all three columns summed.
+  # Rationale: "total refund amount" should capture all forms of compensation.
+  # A real business tracks cash refunds, charge reversals, and store credit
+  # separately in reports, but "total" means the sum of all three.
+  - name: Refund Method
+    text: |
+      "Total refund amount" for a return is the sum of all three refund columns:
+        - store_returns: sr_refunded_cash + sr_reversed_charge + sr_store_credit
+        - catalog_returns: cr_refunded_cash + cr_reversed_charge + cr_store_credit
+        - web_returns: wr_refunded_cash + wr_reversed_charge + wr_account_credit
+      Use COALESCE(column, 0) for each term to handle NULLs.
+      Depends on: Valid Return.
+
+  # ── E. Customer Segmentation ──────────────────────────────────────────────
+
+  # Canonical pick: interpretation (d) — preferred_cust_flag.
+  # Rationale: c_preferred_cust_flag = 'Y' is the most direct, single-column
+  # indicator that TPC-DS provides for customer value. It lives on the customer
+  # table itself (no extra joins required), making it the most unambiguous
+  # governed choice. The other interpretations require traversing demographic
+  # or household dimensions that add complexity without a clear "right" answer.
+  - name: High Value Customer
+    text: |
+      A "high-value" customer is one where c_preferred_cust_flag = 'Y' in the
+      customer table. Exclude records where c_preferred_cust_flag IS NULL.
+      Depends on: Identified Customer Sale.
+
+  - name: Customer Segment Education
+    text: |
+      Segment customers by education using cd_education_status from
+      customer_demographics (join customer.c_current_cdemo_sk =
+      customer_demographics.cd_demo_sk):
+        - "Higher education": cd_education_status IN ('4 yr Degree', 'Advanced Degree')
+        - "Some college": cd_education_status IN ('College', '2 yr Degree')
+        - "No college": cd_education_status IN ('Primary', 'Secondary')
+      Exclude rows where cd_education_status = 'Unknown'.
+      Depends on: Identified Customer Sale.
+
+  - name: Customer Location Type
+    text: |
+      Customer dwelling type from customer_address.ca_location_type (join
+      customer.c_current_addr_sk = customer_address.ca_address_sk). Valid
+      values: 'single family', 'condo', 'apartment'. Exclude records where
+      ca_location_type IS NULL.
+      Depends on: Identified Customer Sale.
+
+  # Canonical pick: interpretation (b) — full breakdown.
+  # Rationale: the full breakdown (M, S, D, W) preserves information and is
+  # more useful for analysis than collapsing to binary. Excluding U (unknown)
+  # is non-negotiable for data quality.
+  - name: Customer Marital Segment
+    text: |
+      Segment customers by marital status using cd_marital_status from
+      customer_demographics:
+        - 'M' = Married
+        - 'S' = Single
+        - 'D' = Divorced
+        - 'W' = Widowed
+      Exclude rows where cd_marital_status = 'U' (Unknown).
+      Use the full four-category breakdown; do NOT collapse to binary
+      (married vs. unmarried).
+      Depends on: Identified Customer Sale.
+
+  # ── F. Promotional Impact ─────────────────────────────────────────────────
+
+  - name: Promoted Sale
+    text: |
+      A sale is "promoted" when its promotion SK is NOT NULL:
+        - store_sales: ss_promo_sk IS NOT NULL
+        - catalog_sales: cs_promo_sk IS NOT NULL
+        - web_sales: ws_promo_sk IS NOT NULL
+      NULL promo SK means no promotion was applied.
+      Depends on: Valid Sale.
+
+  - name: Promotional Lift
+    text: |
+      Promotional lift = AVG(ss_ext_sales_price) for promoted sales minus
+      AVG(ss_ext_sales_price) for non-promoted sales, within the same item
+      category (join item via ss_item_sk = i_item_sk, group by i_category)
+      and time period (join date_dim via ss_sold_date_sk).
+      Depends on: Promoted Sale, Sale Date.
+
+  # Canonical pick: interpretation (c) — both positive lift AND low return rate.
+  # Rationale: a real business would require both signals before declaring a
+  # promotion effective. This also exercises the deepest dependency chain in
+  # the rule set (depth 3).
+  - name: Effective Promotion
+    text: |
+      A promotion is "effective" when BOTH conditions hold:
+        1. Positive lift: the item's average ext_sales_price during the
+           promotion exceeded its average non-promotional price (per the
+           Promotional Lift rule).
+        2. Low return rate: items sold under the promotion have a return rate
+           (per the Return Rate rule) below the overall category average.
+      Depends on: Promotional Lift, Return Rate.
+
+  # ── G. Shipping & Fulfillment (Catalog/Web only) ──────────────────────────
+
+  - name: Shipped Sale
+    text: |
+      A catalog or web sale is "shipped" when its ship-date SK is NOT NULL:
+        - catalog_sales: cs_ship_date_sk IS NOT NULL
+        - web_sales: ws_ship_date_sk IS NOT NULL
+      NULL ship date = not yet fulfilled.
+      Depends on: Valid Sale.
+
+  - name: Fulfillment Delay
+    text: |
+      Days between sale and shipment. Requires TWO separate joins to date_dim:
+        1. Join cs_sold_date_sk (or ws_sold_date_sk) to date_dim AS sold_d
+        2. Join cs_ship_date_sk (or ws_ship_date_sk) to date_dim AS ship_d
+        3. Compute: ship_d.d_date - sold_d.d_date as fulfillment_days
+      Depends on: Shipped Sale, Sale Date.
+
+  # ── H. Profit & Margin ────────────────────────────────────────────────────
+
+  - name: Gross Margin
+    text: |
+      Gross margin per item = sales_price - wholesale_cost:
+        - store_sales: ss_sales_price - ss_wholesale_cost
+        - catalog_sales: cs_sales_price - cs_wholesale_cost
+        - web_sales: ws_sales_price - ws_wholesale_cost
+      At aggregate level, SUM these across line items.
+      Depends on: Valid Sale.
+
+  - name: Profitable Sale
+    text: |
+      A sale where net_profit > 0:
+        - store_sales: ss_net_profit > 0
+        - catalog_sales: cs_net_profit > 0
+        - web_sales: ws_net_profit > 0
+      Note: ~70% of store_sales have negative net_profit in TPC-DS data.
+      Do not assume most sales are profitable.
+      Depends on: Valid Sale.
+
+  # Canonical pick: interpretation (c) — cross-channel, return-adjusted.
+  # Rationale: "net revenue" at the reporting level should capture all channels
+  # (per Total Sales rule) and subtract returns (per Net Sale discussion). This
+  # is the most complete, defensible definition and exercises the compound
+  # dependency on two other rules.
+  - name: Net Revenue
+    text: |
+      "Net revenue" at the reporting level:
+        1. Sum net_paid (per the Net Sale rule) across ALL three channels
+           (per the Total Sales rule).
+        2. Subtract total return amounts: SUM of (sr_return_amt) from
+           store_returns + SUM of (cr_return_amount) from catalog_returns +
+           SUM of (wr_return_amt) from web_returns, for valid returns only.
+      Apply Valid Sale and Valid Return filters to their respective tables.
+      Depends on: Net Sale, Total Sales, Valid Sale.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_query validation rules — checklist items the validator uses
+# ─────────────────────────────────────────────────────────────────────────────
+check_query_rules: |
+  - Missing NULL filter on sold-date SK columns: store_sales queries must
+    include ss_sold_date_sk IS NOT NULL, catalog_sales must include
+    cs_sold_date_sk IS NOT NULL, web_sales must include ws_sold_date_sk IS
+    NOT NULL — unless the query intentionally counts pending transactions.
+  - Missing compound join key on return-rate queries: joins between sales
+    and returns tables MUST use BOTH item_sk AND ticket/order_number, not
+    item_sk alone. For store: (ss_item_sk = sr_item_sk AND ss_ticket_number
+    = sr_ticket_number). For catalog: (cs_item_sk = cr_item_sk AND
+    cs_order_number = cr_order_number). For web: (ws_item_sk = wr_item_sk
+    AND ws_order_number = wr_order_number).
+  - Using raw surrogate key values for date filtering instead of joining to
+    date_dim — always join to date_dim and filter on d_year, d_moy, d_date,
+    etc.
+  - "Total sales" queries that only use store_sales — per business rules,
+    total sales requires UNION ALL of store_sales, catalog_sales, and
+    web_sales.
+  - Missing COALESCE on refund columns when computing total refund amounts —
+    sr_refunded_cash, sr_reversed_charge, sr_store_credit (and catalog/web
+    equivalents) can be NULL.
+  - Queries filtering on cd_marital_status or cd_education_status that
+    include 'Unknown' or 'U' values — these should be excluded per business
+    rules.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# schema routing rules — tells schema_analysis which tables to fetch per topic
+# ─────────────────────────────────────────────────────────────────────────────
+schema_routing_rules: |
+  TABLE ROUTING RULES — always fetch these tables for these query types:
+
+  - Sales queries (any channel) → fetch the relevant sales fact table
+    (store_sales, catalog_sales, web_sales) AND date_dim for date filtering.
+
+  - "Total sales" or "all sales" → fetch ALL THREE sales fact tables
+    (store_sales, catalog_sales, web_sales) plus date_dim.
+
+  - Customer segmentation → fetch customer, customer_demographics (via
+    c_current_cdemo_sk = cd_demo_sk), customer_address (via c_current_addr_sk
+    = ca_address_sk), and household_demographics (via c_current_hdemo_sk =
+    hd_demo_sk) as needed.
+
+  - Return/refund queries → fetch the relevant returns table (store_returns,
+    catalog_returns, web_returns) AND the corresponding sales table (for
+    join keys) AND reason (for return reason filtering).
+
+  - Promotion queries → fetch store_sales (or catalog/web equivalent), item
+    (for i_category grouping), promotion, and date_dim.
+
+  - Shipping/fulfillment queries → fetch catalog_sales or web_sales AND
+    date_dim (need TWO joins: one for sold_date, one for ship_date).
+
+  - Profit/margin queries → fetch the relevant sales fact table. No extra
+    dimension tables needed beyond date_dim.
