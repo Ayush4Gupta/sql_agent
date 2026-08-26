@@ -228,7 +228,7 @@ def _build_provider_instances(provider: str) -> list[tuple[str, BaseChatModel]]:
     if provider == "azure":
         return [("azure", _build_azure())]
     elif provider == "gemini":
-        return [("gemini", _build_gemini())]
+        return _build_gemini_instances()
     elif provider == "groq":
         return _build_groq_instances()
 
@@ -262,30 +262,45 @@ def _build_azure():
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
 
-def _build_gemini():
+def _build_gemini_instances() -> list[tuple[str, BaseChatModel]]:
+    """Build one ChatGoogleGenerativeAI per API key.
+
+    Reads keys from GOOGLE_API_KEYS (comma-separated) first, falling back
+    to GOOGLE_API_KEY (single key or comma-separated). Each key creates a
+    separate ChatGoogleGenerativeAI instance for the round-robin pool.
+    """
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    api_key     = os.getenv("GOOGLE_API_KEY", "")
     model       = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     temperature = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 
-    if not api_key:
+    # Collect keys: prefer GOOGLE_API_KEYS, fall back to GOOGLE_API_KEY
+    raw_keys = os.getenv("GOOGLE_API_KEYS", "") or os.getenv("GOOGLE_API_KEY", "")
+    keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+
+    if not keys:
         raise ValueError(
-            "LLM_PROVIDER=gemini but GOOGLE_API_KEY is not set. "
+            "LLM_PROVIDER=gemini but neither GOOGLE_API_KEYS nor GOOGLE_API_KEY is set. "
             "Get one at https://aistudio.google.com/apikey"
         )
 
-    llm = ChatGoogleGenerativeAI(
-        model=model,
-        google_api_key=api_key,
-        temperature=temperature,
-    )
+    instances = []
+    for i, key in enumerate(keys):
+        llm = ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=key,
+            temperature=temperature,
+        )
+        name = f"gemini-{i+1}" if len(keys) > 1 else "gemini"
+        instances.append((name, llm))
+
     logger.info(
-        "[llm_factory] Provider=gemini | model=%s | temperature=%s",
+        "[llm_factory] Provider=gemini | model=%s | temperature=%s | %d key(s)",
         model,
         temperature,
+        len(keys),
     )
-    return llm
+    return instances
 
 
 # ── Groq ──────────────────────────────────────────────────────────────────────
