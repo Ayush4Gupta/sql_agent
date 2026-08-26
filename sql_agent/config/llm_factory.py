@@ -177,18 +177,16 @@ def get_llm():
     if not providers:
         raise ValueError("LLM_PROVIDER is empty.")
 
-    # Single provider — original behaviour, no wrapper overhead
-    if len(providers) == 1:
-        return _build_single(providers[0])
-
-    # Multi-provider — build all and wrap in RoundRobinLLM
+    # Collect all (name, llm) pairs — a single provider may expand to
+    # multiple instances (e.g. groq with GROQ_API_KEYS).
     models = []
     names = []
     for p in providers:
         try:
-            llm = _build_single(p)
-            models.append(llm)
-            names.append(p)
+            instances = _build_provider_instances(p)
+            for name, llm in instances:
+                models.append(llm)
+                names.append(name)
         except Exception as e:
             logger.warning(
                 "[llm_factory] Could not build provider '%s': %s — skipping",
@@ -200,38 +198,39 @@ def get_llm():
             f"LLM_PROVIDER={raw!r} but no providers could be initialised."
         )
 
+    # Single instance — return directly, no wrapper overhead
     if len(models) == 1:
-        logger.warning(
-            "[llm_factory] Only 1 of %d providers initialised — "
-            "falling back to single-provider mode (%s)",
-            len(providers),
-            names[0],
-        )
         return models[0]
 
     wrapper = RoundRobinLLM(models=models, provider_names=names)
     logger.info(
-        "[llm_factory] Round-robin mode | providers=%s | %d active",
-        names,
+        "[llm_factory] Round-robin mode | %d instances: %s",
         len(models),
+        names,
     )
     return wrapper
 
 
-_BUILDERS = {
-    "azure": "_build_azure",
-    "gemini": "_build_gemini",
-    "groq": "_build_groq",
-}
+_SUPPORTED_PROVIDERS = {"azure", "gemini", "groq"}
 
 
-def _build_single(provider: str) -> BaseChatModel:
-    """Build a single provider's LLM instance."""
-    if provider not in _BUILDERS:
+def _build_provider_instances(provider: str) -> list[tuple[str, BaseChatModel]]:
+    """Build LLM instance(s) for a provider.
+
+    Returns a list of (display_name, llm) tuples.  Most providers return
+    exactly one; groq may return many if GROQ_API_KEYS has multiple keys.
+    """
+    if provider not in _SUPPORTED_PROVIDERS:
         raise ValueError(
-            f"Unknown provider {provider!r}. Supported: {list(_BUILDERS.keys())}"
+            f"Unknown provider {provider!r}. Supported: {sorted(_SUPPORTED_PROVIDERS)}"
         )
-    return globals()[_BUILDERS[provider]]()
+
+    if provider == "azure":
+        return [("azure", _build_azure())]
+    elif provider == "gemini":
+        return [("gemini", _build_gemini())]
+    elif provider == "groq":
+        return _build_groq_instances()
 
 
 # ── Azure OpenAI ──────────────────────────────────────────────────────────────
@@ -291,28 +290,42 @@ def _build_gemini():
 
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
-def _build_groq():
+def _build_groq_instances() -> list[tuple[str, BaseChatModel]]:
+    """Build one ChatGroq per API key.
+
+    Reads keys from GROQ_API_KEYS (comma-separated) first, falling back
+    to the legacy GROQ_API_KEY (single key).  Each key creates a separate
+    ChatGroq instance for the round-robin pool.
+    """
     from langchain_groq import ChatGroq
 
-    api_key     = os.getenv("GROQ_API_KEY", "")
     model       = os.getenv("GROQ_MODEL") or os.getenv("GROQ_MODEL_NAME") or "openai/gpt-oss-120b"
     temperature = float(os.getenv("GROQ_TEMPERATURE", "0"))
 
-    if not api_key:
+    # Collect keys: prefer GROQ_API_KEYS, fall back to GROQ_API_KEY
+    raw_keys = os.getenv("GROQ_API_KEYS", "") or os.getenv("GROQ_API_KEY", "")
+    keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+
+    if not keys:
         raise ValueError(
-            "LLM_PROVIDER=groq but GROQ_API_KEY is not set. "
-            "Get one at https://console.groq.com/keys"
+            "LLM_PROVIDER=groq but neither GROQ_API_KEYS nor GROQ_API_KEY is set. "
+            "Get keys at https://console.groq.com/keys"
         )
 
-    llm = ChatGroq(
-        model=model,
-        api_key=api_key,
-        temperature=temperature,
-    )
+    instances = []
+    for i, key in enumerate(keys):
+        llm = ChatGroq(
+            model=model,
+            api_key=key,
+            temperature=temperature,
+        )
+        name = f"groq-{i+1}" if len(keys) > 1 else "groq"
+        instances.append((name, llm))
+
     logger.info(
-        "[llm_factory] Provider=groq | model=%s | temperature=%s",
+        "[llm_factory] Provider=groq | model=%s | temperature=%s | %d key(s)",
         model,
         temperature,
+        len(keys),
     )
-    return llm
-
+    return instances
