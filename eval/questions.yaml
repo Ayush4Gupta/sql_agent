@@ -1,0 +1,789 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TPC-DS Evaluation Question Set — Gold SQL
+#
+# 40 questions with canonical gold SQL for the eval harness.
+# All SQL runs against tpcds_sf1.duckdb and follows the canonical
+# interpretations committed in profiles/tpcds/rules.yaml.
+#
+# Categories:
+#   ambiguous (14)  — 2 per ambiguous rule; differentiates eval conditions
+#   governed  (20)  — 1 per non-ambiguous rule; tests governance compliance
+#   baseline   (6)  — pure schema lookups; all conditions should agree
+# ─────────────────────────────────────────────────────────────────────────────
+
+questions:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # A. AMBIGUOUS RULES  (14 questions — 2 per ambiguous rule)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── net_sale ────────────────────────────────────────────────────────────────
+  - id: Q01
+    question: "What were the net sales for the store channel in 2002?"
+    gold_sql: |
+      SELECT SUM(ss_net_paid) AS net_sales
+      FROM store_sales ss
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+    rules_exercised: [valid_sale, net_sale, sale_date, store_channel]
+    category: ambiguous
+    ambiguous_rule: net_sale
+    notes: >
+      Canonical pick: ss_net_paid (after-discount amount, no return offset).
+      An ungoverned model might subtract sr_return_amt, yielding a lower number.
+
+  - id: Q02
+    question: "Which month in 2001 had the highest net sales in the catalog channel?"
+    gold_sql: |
+      SELECT d.d_moy AS month_of_year, SUM(cs.cs_net_paid) AS net_sales
+      FROM catalog_sales cs
+      JOIN date_dim d ON cs.cs_sold_date_sk = d.d_date_sk
+      WHERE cs.cs_sold_date_sk IS NOT NULL
+        AND d.d_year = 2001
+      GROUP BY d.d_moy
+      ORDER BY net_sales DESC
+      LIMIT 1
+    rules_exercised: [valid_sale, net_sale, sale_date, monthly_period, catalog_channel]
+    category: ambiguous
+    ambiguous_rule: net_sale
+    notes: >
+      Indirect: the month ranking depends on using cs_net_paid consistently.
+
+  # ── total_sales ─────────────────────────────────────────────────────────────
+  - id: Q03
+    question: "What were total sales across all channels in 2002?"
+    gold_sql: |
+      SELECT SUM(net_paid) AS total_sales
+      FROM (
+          SELECT ss_net_paid AS net_paid
+          FROM store_sales ss
+          JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+          WHERE ss.ss_sold_date_sk IS NOT NULL AND d.d_year = 2002
+          UNION ALL
+          SELECT cs_net_paid
+          FROM catalog_sales cs
+          JOIN date_dim d ON cs.cs_sold_date_sk = d.d_date_sk
+          WHERE cs.cs_sold_date_sk IS NOT NULL AND d.d_year = 2002
+          UNION ALL
+          SELECT ws_net_paid
+          FROM web_sales ws
+          JOIN date_dim d ON ws.ws_sold_date_sk = d.d_date_sk
+          WHERE ws.ws_sold_date_sk IS NOT NULL AND d.d_year = 2002
+      ) all_sales
+    rules_exercised: [valid_sale, net_sale, sale_date, total_sales]
+    category: ambiguous
+    ambiguous_rule: total_sales
+    notes: >
+      Canonical: UNION ALL of all 3 channels. An ungoverned model often
+      defaults to store_sales only, yielding ~48% of the correct answer.
+
+  - id: Q04
+    question: "Which year had the highest total sales?"
+    gold_sql: |
+      SELECT d.d_year, SUM(net_paid) AS total_sales
+      FROM (
+          SELECT ss_net_paid AS net_paid, ss_sold_date_sk AS sold_date_sk
+          FROM store_sales WHERE ss_sold_date_sk IS NOT NULL
+          UNION ALL
+          SELECT cs_net_paid, cs_sold_date_sk
+          FROM catalog_sales WHERE cs_sold_date_sk IS NOT NULL
+          UNION ALL
+          SELECT ws_net_paid, ws_sold_date_sk
+          FROM web_sales WHERE ws_sold_date_sk IS NOT NULL
+      ) all_sales
+      JOIN date_dim d ON all_sales.sold_date_sk = d.d_date_sk
+      GROUP BY d.d_year
+      ORDER BY total_sales DESC
+      LIMIT 1
+    rules_exercised: [valid_sale, net_sale, total_sales, sale_date, fiscal_year]
+    category: ambiguous
+    ambiguous_rule: total_sales
+    notes: >
+      Indirect: the year ranking depends on summing all 3 channels.
+      Store-only would give a different winning year if the channel mix shifted.
+
+  # ── refund_method ───────────────────────────────────────────────────────────
+  - id: Q05
+    question: "What was the total refund amount for store returns in 2001?"
+    gold_sql: |
+      SELECT SUM(
+          COALESCE(sr_refunded_cash, 0) +
+          COALESCE(sr_reversed_charge, 0) +
+          COALESCE(sr_store_credit, 0)
+      ) AS total_refund
+      FROM store_returns sr
+      JOIN date_dim d ON sr.sr_returned_date_sk = d.d_date_sk
+      WHERE sr.sr_returned_date_sk IS NOT NULL
+        AND d.d_year = 2001
+    rules_exercised: [valid_return, refund_method, sale_date]
+    category: ambiguous
+    ambiguous_rule: refund_method
+    notes: >
+      Canonical: sum all 3 refund columns with COALESCE. An ungoverned model
+      might use only sr_refunded_cash, yielding ~40% of the correct total.
+
+  - id: Q06
+    question: "What is the average refund amount per catalog return?"
+    gold_sql: |
+      SELECT ROUND(AVG(
+          COALESCE(cr_refunded_cash, 0) +
+          COALESCE(cr_reversed_charge, 0) +
+          COALESCE(cr_store_credit, 0)
+      ), 2) AS avg_refund
+      FROM catalog_returns
+      WHERE cr_returned_date_sk IS NOT NULL
+    rules_exercised: [valid_return, refund_method]
+    category: ambiguous
+    ambiguous_rule: refund_method
+    notes: >
+      Indirect: average refund depends on summing all 3 refund columns.
+
+  # ── high_value_customer ─────────────────────────────────────────────────────
+  - id: Q07
+    question: "How many high-value customers are there?"
+    gold_sql: |
+      SELECT COUNT(*) AS high_value_count
+      FROM customer
+      WHERE c_preferred_cust_flag = 'Y'
+    rules_exercised: [high_value_customer]
+    category: ambiguous
+    ambiguous_rule: high_value_customer
+    notes: >
+      Canonical: c_preferred_cust_flag = 'Y'. An ungoverned model might use
+      credit rating, buy potential, or income band — each gives a different count.
+
+  - id: Q08
+    question: "What is the total store spending by high-value customers in 2002?"
+    gold_sql: |
+      SELECT SUM(ss.ss_net_paid) AS total_spending
+      FROM store_sales ss
+      JOIN customer c ON ss.ss_customer_sk = c.c_customer_sk
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND ss.ss_customer_sk IS NOT NULL
+        AND c.c_preferred_cust_flag = 'Y'
+        AND d.d_year = 2002
+    rules_exercised: [valid_sale, identified_customer_sale, high_value_customer, net_sale, sale_date]
+    category: ambiguous
+    ambiguous_rule: high_value_customer
+    notes: >
+      Indirect: spending total depends on the high-value definition.
+      Different definitions yield different customer sets → different totals.
+
+  # ── customer_marital_segment ────────────────────────────────────────────────
+  - id: Q09
+    question: "How are customers distributed across marital status segments?"
+    gold_sql: |
+      SELECT cd.cd_marital_status, COUNT(*) AS customer_count
+      FROM customer c
+      JOIN customer_demographics cd ON c.c_current_cdemo_sk = cd.cd_demo_sk
+      WHERE cd.cd_marital_status != 'U'
+      GROUP BY cd.cd_marital_status
+      ORDER BY cd.cd_marital_status
+    rules_exercised: [customer_marital_segment]
+    category: ambiguous
+    ambiguous_rule: customer_marital_segment
+    notes: >
+      Canonical: 4-way breakdown (M, S, D, W), exclude U. An ungoverned model
+      might collapse to binary (married vs unmarried) or include U.
+
+  - id: Q10
+    question: "What is the average store spending per marital segment in 2001?"
+    gold_sql: |
+      SELECT cd.cd_marital_status,
+             ROUND(AVG(ss.ss_net_paid), 2) AS avg_spending
+      FROM store_sales ss
+      JOIN customer c ON ss.ss_customer_sk = c.c_customer_sk
+      JOIN customer_demographics cd ON c.c_current_cdemo_sk = cd.cd_demo_sk
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND ss.ss_customer_sk IS NOT NULL
+        AND cd.cd_marital_status != 'U'
+        AND d.d_year = 2001
+      GROUP BY cd.cd_marital_status
+      ORDER BY cd.cd_marital_status
+    rules_exercised: [valid_sale, identified_customer_sale, customer_marital_segment, net_sale, sale_date]
+    category: ambiguous
+    ambiguous_rule: customer_marital_segment
+    notes: >
+      Indirect: the number of rows in the result depends on binary vs 4-way.
+
+  # ── effective_promotion ─────────────────────────────────────────────────────
+  - id: Q11
+    question: "Which item categories had effective promotions in store sales for 2002?"
+    gold_sql: |
+      WITH promoted_avg AS (
+          SELECT i.i_category,
+                 AVG(ss.ss_ext_sales_price) AS avg_promo_price
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND ss.ss_promo_sk IS NOT NULL
+            AND d.d_year = 2002
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      non_promoted_avg AS (
+          SELECT i.i_category,
+                 AVG(ss.ss_ext_sales_price) AS avg_non_promo_price
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND ss.ss_promo_sk IS NULL
+            AND d.d_year = 2002
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      promo_return_rate AS (
+          SELECT i.i_category,
+                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS promo_rr
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          LEFT JOIN store_returns sr
+            ON ss.ss_item_sk = sr.sr_item_sk
+            AND ss.ss_ticket_number = sr.sr_ticket_number
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND ss.ss_promo_sk IS NOT NULL
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      overall_return_rate AS (
+          SELECT i.i_category,
+                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS overall_rr
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          LEFT JOIN store_returns sr
+            ON ss.ss_item_sk = sr.sr_item_sk
+            AND ss.ss_ticket_number = sr.sr_ticket_number
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      )
+      SELECT pa.i_category
+      FROM promoted_avg pa
+      JOIN non_promoted_avg npa ON pa.i_category = npa.i_category
+      JOIN promo_return_rate prr ON pa.i_category = prr.i_category
+      JOIN overall_return_rate orr ON pa.i_category = orr.i_category
+      WHERE pa.avg_promo_price > npa.avg_non_promo_price
+        AND prr.promo_rr < orr.overall_rr
+      ORDER BY pa.i_category
+    rules_exercised: [valid_sale, promoted_sale, promotional_lift, return_rate, effective_promotion, sale_date]
+    category: ambiguous
+    ambiguous_rule: effective_promotion
+    notes: >
+      Canonical: BOTH positive lift AND low return rate (depth-3 dependency).
+      An ungoverned model using only lift would include more categories.
+
+  - id: Q12
+    question: "How many promoted store sales in 2002 were in categories with effective promotions?"
+    gold_sql: |
+      WITH promoted_avg AS (
+          SELECT i.i_category,
+                 AVG(ss.ss_ext_sales_price) AS avg_promo_price
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND ss.ss_promo_sk IS NOT NULL
+            AND d.d_year = 2002
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      non_promoted_avg AS (
+          SELECT i.i_category,
+                 AVG(ss.ss_ext_sales_price) AS avg_non_promo_price
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND ss.ss_promo_sk IS NULL
+            AND d.d_year = 2002
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      promo_return_rate AS (
+          SELECT i.i_category,
+                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS promo_rr
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          LEFT JOIN store_returns sr
+            ON ss.ss_item_sk = sr.sr_item_sk
+            AND ss.ss_ticket_number = sr.sr_ticket_number
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND ss.ss_promo_sk IS NOT NULL
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      overall_return_rate AS (
+          SELECT i.i_category,
+                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS overall_rr
+          FROM store_sales ss
+          JOIN item i ON ss.ss_item_sk = i.i_item_sk
+          LEFT JOIN store_returns sr
+            ON ss.ss_item_sk = sr.sr_item_sk
+            AND ss.ss_ticket_number = sr.sr_ticket_number
+          WHERE ss.ss_sold_date_sk IS NOT NULL
+            AND i.i_category IS NOT NULL
+          GROUP BY i.i_category
+      ),
+      effective_categories AS (
+          SELECT pa.i_category
+          FROM promoted_avg pa
+          JOIN non_promoted_avg npa ON pa.i_category = npa.i_category
+          JOIN promo_return_rate prr ON pa.i_category = prr.i_category
+          JOIN overall_return_rate orr ON pa.i_category = orr.i_category
+          WHERE pa.avg_promo_price > npa.avg_non_promo_price
+            AND prr.promo_rr < orr.overall_rr
+      )
+      SELECT COUNT(*) AS promoted_sales_in_effective_categories
+      FROM store_sales ss
+      JOIN item i ON ss.ss_item_sk = i.i_item_sk
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND ss.ss_promo_sk IS NOT NULL
+        AND d.d_year = 2002
+        AND i.i_category IN (SELECT i_category FROM effective_categories)
+    rules_exercised: [valid_sale, promoted_sale, promotional_lift, return_rate, effective_promotion, sale_date]
+    category: ambiguous
+    ambiguous_rule: effective_promotion
+    notes: >
+      Indirect: count of sales depends on which categories qualify as effective.
+
+  # ── net_revenue ─────────────────────────────────────────────────────────────
+  - id: Q13
+    question: "What was the net revenue for 2002?"
+    gold_sql: |
+      SELECT
+          (SELECT SUM(net_paid) FROM (
+              SELECT ss_net_paid AS net_paid
+              FROM store_sales ss
+              JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+              WHERE ss.ss_sold_date_sk IS NOT NULL AND d.d_year = 2002
+              UNION ALL
+              SELECT cs_net_paid
+              FROM catalog_sales cs
+              JOIN date_dim d ON cs.cs_sold_date_sk = d.d_date_sk
+              WHERE cs.cs_sold_date_sk IS NOT NULL AND d.d_year = 2002
+              UNION ALL
+              SELECT ws_net_paid
+              FROM web_sales ws
+              JOIN date_dim d ON ws.ws_sold_date_sk = d.d_date_sk
+              WHERE ws.ws_sold_date_sk IS NOT NULL AND d.d_year = 2002
+          ))
+          -
+          (SELECT SUM(ret_amt) FROM (
+              SELECT sr_return_amt AS ret_amt
+              FROM store_returns sr
+              JOIN date_dim d ON sr.sr_returned_date_sk = d.d_date_sk
+              WHERE sr.sr_returned_date_sk IS NOT NULL AND d.d_year = 2002
+              UNION ALL
+              SELECT cr_return_amount
+              FROM catalog_returns cr
+              JOIN date_dim d ON cr.cr_returned_date_sk = d.d_date_sk
+              WHERE cr.cr_returned_date_sk IS NOT NULL AND d.d_year = 2002
+              UNION ALL
+              SELECT wr_return_amt
+              FROM web_returns wr
+              JOIN date_dim d ON wr.wr_returned_date_sk = d.d_date_sk
+              WHERE wr.wr_returned_date_sk IS NOT NULL AND d.d_year = 2002
+          ))
+          AS net_revenue
+    rules_exercised: [valid_sale, valid_return, net_sale, total_sales, net_revenue, sale_date]
+    category: ambiguous
+    ambiguous_rule: net_revenue
+    notes: >
+      Canonical: cross-channel net_paid minus cross-channel return amounts.
+      Compounds two other ambiguous rules (net_sale, total_sales).
+
+  - id: Q14
+    question: "Compare net revenue between 2001 and 2002."
+    gold_sql: |
+      WITH yearly_sales AS (
+          SELECT d.d_year, SUM(net_paid) AS total_net_paid
+          FROM (
+              SELECT ss_net_paid AS net_paid, ss_sold_date_sk AS sk
+              FROM store_sales WHERE ss_sold_date_sk IS NOT NULL
+              UNION ALL
+              SELECT cs_net_paid, cs_sold_date_sk
+              FROM catalog_sales WHERE cs_sold_date_sk IS NOT NULL
+              UNION ALL
+              SELECT ws_net_paid, ws_sold_date_sk
+              FROM web_sales WHERE ws_sold_date_sk IS NOT NULL
+          ) s
+          JOIN date_dim d ON s.sk = d.d_date_sk
+          WHERE d.d_year IN (2001, 2002)
+          GROUP BY d.d_year
+      ),
+      yearly_returns AS (
+          SELECT d.d_year, SUM(ret_amt) AS total_returns
+          FROM (
+              SELECT sr_return_amt AS ret_amt, sr_returned_date_sk AS sk
+              FROM store_returns WHERE sr_returned_date_sk IS NOT NULL
+              UNION ALL
+              SELECT cr_return_amount, cr_returned_date_sk
+              FROM catalog_returns WHERE cr_returned_date_sk IS NOT NULL
+              UNION ALL
+              SELECT wr_return_amt, wr_returned_date_sk
+              FROM web_returns WHERE wr_returned_date_sk IS NOT NULL
+          ) r
+          JOIN date_dim d ON r.sk = d.d_date_sk
+          WHERE d.d_year IN (2001, 2002)
+          GROUP BY d.d_year
+      )
+      SELECT s.d_year,
+             s.total_net_paid - r.total_returns AS net_revenue
+      FROM yearly_sales s
+      JOIN yearly_returns r ON s.d_year = r.d_year
+      ORDER BY s.d_year
+    rules_exercised: [valid_sale, valid_return, net_sale, total_sales, net_revenue, sale_date, fiscal_year]
+    category: ambiguous
+    ambiguous_rule: net_revenue
+    notes: >
+      Indirect: year-over-year comparison depends on the net_revenue definition.
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # B. GOVERNED (NON-AMBIGUOUS) RULES  (20 questions — 1 each)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: Q15
+    question: "How many valid store sales are there?"
+    gold_sql: |
+      SELECT COUNT(*) AS valid_store_sales
+      FROM store_sales
+      WHERE ss_sold_date_sk IS NOT NULL
+    rules_exercised: [valid_sale]
+    category: governed
+    notes: Tests ss_sold_date_sk IS NOT NULL filter.
+
+  - id: Q16
+    question: "How many store sales have an identified customer?"
+    gold_sql: |
+      SELECT COUNT(*) AS identified_customer_sales
+      FROM store_sales
+      WHERE ss_sold_date_sk IS NOT NULL
+        AND ss_customer_sk IS NOT NULL
+    rules_exercised: [valid_sale, identified_customer_sale]
+    category: governed
+    notes: Tests both NULL filters (sold_date + customer).
+
+  - id: Q17
+    question: "What were store sales in January 2002?"
+    gold_sql: |
+      SELECT SUM(ss_net_paid) AS jan_2002_sales
+      FROM store_sales ss
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+        AND d.d_moy = 1
+    rules_exercised: [valid_sale, net_sale, sale_date]
+    category: governed
+    notes: Tests join to date_dim and filter on d_year + d_moy.
+
+  - id: Q18
+    question: "Show monthly store sales for 2001."
+    gold_sql: |
+      SELECT d.d_moy AS month_of_year,
+             SUM(ss.ss_net_paid) AS monthly_sales
+      FROM store_sales ss
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2001
+      GROUP BY d.d_moy
+      ORDER BY d.d_moy
+    rules_exercised: [valid_sale, net_sale, sale_date, monthly_period]
+    category: governed
+    notes: Tests GROUP BY d_year, d_moy pattern.
+
+  - id: Q19
+    question: "Show quarterly store sales for 2001."
+    gold_sql: |
+      SELECT d.d_qoy AS quarter,
+             SUM(ss.ss_net_paid) AS quarterly_sales
+      FROM store_sales ss
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2001
+      GROUP BY d.d_qoy
+      ORDER BY d.d_qoy
+    rules_exercised: [valid_sale, net_sale, sale_date, quarterly_period]
+    category: governed
+    notes: Tests d_qoy grouping.
+
+  - id: Q20
+    question: "Show yearly store sales for all available years."
+    gold_sql: |
+      SELECT d.d_year,
+             SUM(ss.ss_net_paid) AS yearly_sales
+      FROM store_sales ss
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+      GROUP BY d.d_year
+      ORDER BY d.d_year
+    rules_exercised: [valid_sale, net_sale, sale_date, fiscal_year]
+    category: governed
+    notes: Tests d_year (not d_fy_year) for year grouping.
+
+  - id: Q21
+    question: "What are the top 5 stores by sales in 2002?"
+    gold_sql: |
+      SELECT s.s_store_name, SUM(ss.ss_net_paid) AS store_sales
+      FROM store_sales ss
+      JOIN store s ON ss.ss_store_sk = s.s_store_sk
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+      GROUP BY s.s_store_name
+      ORDER BY store_sales DESC
+      LIMIT 5
+    rules_exercised: [valid_sale, net_sale, sale_date, store_channel]
+    category: governed
+    notes: Tests store dimension join via ss_store_sk.
+
+  - id: Q22
+    question: "What were total catalog sales in 2002?"
+    gold_sql: |
+      SELECT SUM(cs.cs_net_paid) AS catalog_sales
+      FROM catalog_sales cs
+      JOIN date_dim d ON cs.cs_sold_date_sk = d.d_date_sk
+      WHERE cs.cs_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+    rules_exercised: [valid_sale, net_sale, sale_date, catalog_channel]
+    category: governed
+    notes: Tests catalog_sales fact table usage.
+
+  - id: Q23
+    question: "What were total web sales in 2002?"
+    gold_sql: |
+      SELECT SUM(ws.ws_net_paid) AS web_sales
+      FROM web_sales ws
+      JOIN date_dim d ON ws.ws_sold_date_sk = d.d_date_sk
+      WHERE ws.ws_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+    rules_exercised: [valid_sale, net_sale, sale_date, web_channel]
+    category: governed
+    notes: Tests web_sales fact table usage.
+
+  - id: Q24
+    question: "How many valid store returns are there?"
+    gold_sql: |
+      SELECT COUNT(*) AS valid_store_returns
+      FROM store_returns
+      WHERE sr_returned_date_sk IS NOT NULL
+    rules_exercised: [valid_return]
+    category: governed
+    notes: Tests sr_returned_date_sk IS NOT NULL filter.
+
+  - id: Q25
+    question: "What is the overall store return rate?"
+    gold_sql: |
+      SELECT ROUND(
+          100.0 * COUNT(sr.sr_item_sk) / COUNT(ss.ss_item_sk), 2
+      ) AS return_rate_pct
+      FROM store_sales ss
+      LEFT JOIN store_returns sr
+        ON ss.ss_item_sk = sr.sr_item_sk
+        AND ss.ss_ticket_number = sr.sr_ticket_number
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+    rules_exercised: [valid_sale, return_rate]
+    category: governed
+    notes: >
+      Tests compound join (item_sk + ticket_number). Single-key join
+      inflates the rate because different tickets can sell the same item.
+
+  - id: Q26
+    question: "How many store returns were due to product defects?"
+    gold_sql: |
+      SELECT COUNT(*) AS defective_returns
+      FROM store_returns sr
+      JOIN reason r ON sr.sr_reason_sk = r.r_reason_sk
+      WHERE sr.sr_returned_date_sk IS NOT NULL
+        AND r.r_reason_desc IN (
+            'Package was damaged',
+            'Stopped working',
+            'Parts missing',
+            'Not working any more'
+        )
+    rules_exercised: [valid_return, defective_return]
+    category: governed
+    notes: Tests specific r_reason_desc filter list.
+
+  - id: Q27
+    question: "What percentage of valid store sales had a promotion applied?"
+    gold_sql: |
+      SELECT ROUND(
+          100.0 * SUM(CASE WHEN ss_promo_sk IS NOT NULL THEN 1 ELSE 0 END)
+          / COUNT(*), 2
+      ) AS promoted_pct
+      FROM store_sales
+      WHERE ss_sold_date_sk IS NOT NULL
+    rules_exercised: [valid_sale, promoted_sale]
+    category: governed
+    notes: Tests ss_promo_sk IS NOT NULL as promotion indicator.
+
+  - id: Q28
+    question: "What is the promotional lift by item category for store sales in 2002?"
+    gold_sql: |
+      SELECT i.i_category,
+             ROUND(AVG(CASE WHEN ss.ss_promo_sk IS NOT NULL
+                            THEN ss.ss_ext_sales_price END), 2) AS avg_promoted,
+             ROUND(AVG(CASE WHEN ss.ss_promo_sk IS NULL
+                            THEN ss.ss_ext_sales_price END), 2) AS avg_non_promoted,
+             ROUND(AVG(CASE WHEN ss.ss_promo_sk IS NOT NULL
+                            THEN ss.ss_ext_sales_price END)
+                 - AVG(CASE WHEN ss.ss_promo_sk IS NULL
+                            THEN ss.ss_ext_sales_price END), 2) AS lift
+      FROM store_sales ss
+      JOIN item i ON ss.ss_item_sk = i.i_item_sk
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+        AND i.i_category IS NOT NULL
+      GROUP BY i.i_category
+      ORDER BY lift DESC
+    rules_exercised: [valid_sale, promoted_sale, promotional_lift, sale_date]
+    category: governed
+    notes: Tests promoted vs non-promoted AVG ext_sales_price by category.
+
+  - id: Q29
+    question: "How many catalog sales have been shipped?"
+    gold_sql: |
+      SELECT COUNT(*) AS shipped_catalog_sales
+      FROM catalog_sales
+      WHERE cs_sold_date_sk IS NOT NULL
+        AND cs_ship_date_sk IS NOT NULL
+    rules_exercised: [valid_sale, shipped_sale]
+    category: governed
+    notes: Tests cs_ship_date_sk IS NOT NULL filter.
+
+  - id: Q30
+    question: "What is the average fulfillment delay in days for catalog orders?"
+    gold_sql: |
+      SELECT ROUND(AVG(ship_d.d_date - sold_d.d_date), 1) AS avg_delay_days
+      FROM catalog_sales cs
+      JOIN date_dim sold_d ON cs.cs_sold_date_sk = sold_d.d_date_sk
+      JOIN date_dim ship_d ON cs.cs_ship_date_sk = ship_d.d_date_sk
+      WHERE cs.cs_sold_date_sk IS NOT NULL
+        AND cs.cs_ship_date_sk IS NOT NULL
+    rules_exercised: [valid_sale, shipped_sale, fulfillment_delay, sale_date]
+    category: governed
+    notes: Tests double date_dim join pattern (sold_d + ship_d).
+
+  - id: Q31
+    question: "What is the total gross margin for store sales in 2002?"
+    gold_sql: |
+      SELECT SUM(ss.ss_sales_price - ss.ss_wholesale_cost) AS gross_margin
+      FROM store_sales ss
+      JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk
+      WHERE ss.ss_sold_date_sk IS NOT NULL
+        AND d.d_year = 2002
+    rules_exercised: [valid_sale, gross_margin, sale_date]
+    category: governed
+    notes: Tests sales_price - wholesale_cost formula.
+
+  - id: Q32
+    question: "What percentage of store sales are profitable?"
+    gold_sql: |
+      SELECT ROUND(
+          100.0 * SUM(CASE WHEN ss_net_profit > 0 THEN 1 ELSE 0 END)
+          / COUNT(*), 1
+      ) AS profitable_pct
+      FROM store_sales
+      WHERE ss_sold_date_sk IS NOT NULL
+    rules_exercised: [valid_sale, profitable_sale]
+    category: governed
+    notes: Tests ss_net_profit > 0 condition. Expect ~25% (not >50%).
+
+  - id: Q33
+    question: "How many customers are in each education segment?"
+    gold_sql: |
+      SELECT
+          CASE
+              WHEN cd.cd_education_status IN ('4 yr Degree', 'Advanced Degree')
+                  THEN 'Higher education'
+              WHEN cd.cd_education_status IN ('College', '2 yr Degree')
+                  THEN 'Some college'
+              WHEN cd.cd_education_status IN ('Primary', 'Secondary')
+                  THEN 'No college'
+          END AS education_segment,
+          COUNT(*) AS customer_count
+      FROM customer c
+      JOIN customer_demographics cd ON c.c_current_cdemo_sk = cd.cd_demo_sk
+      WHERE cd.cd_education_status != 'Unknown'
+      GROUP BY education_segment
+      ORDER BY customer_count DESC
+    rules_exercised: [customer_segment_education]
+    category: governed
+    notes: Tests 3-bucket CASE grouping and Unknown exclusion.
+
+  - id: Q34
+    question: "How many customers live in each location type?"
+    gold_sql: |
+      SELECT ca.ca_location_type, COUNT(*) AS customer_count
+      FROM customer c
+      JOIN customer_address ca ON c.c_current_addr_sk = ca.ca_address_sk
+      WHERE ca.ca_location_type IS NOT NULL
+      GROUP BY ca.ca_location_type
+      ORDER BY customer_count DESC
+    rules_exercised: [customer_location_type]
+    category: governed
+    notes: Tests customer_address join and NULL exclusion.
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # C. BASELINE — NO RULES  (6 questions)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: Q35
+    question: "How many customers are there?"
+    gold_sql: |
+      SELECT COUNT(*) AS customer_count FROM customer
+    rules_exercised: []
+    category: baseline
+    notes: Simple COUNT — all eval conditions should match.
+
+  - id: Q36
+    question: "How many items are in the catalog?"
+    gold_sql: |
+      SELECT COUNT(*) AS item_count FROM item
+    rules_exercised: []
+    category: baseline
+    notes: Simple COUNT.
+
+  - id: Q37
+    question: "How many stores are there?"
+    gold_sql: |
+      SELECT COUNT(*) AS store_count FROM store
+    rules_exercised: []
+    category: baseline
+    notes: Simple COUNT.
+
+  - id: Q38
+    question: "What are all the item categories?"
+    gold_sql: |
+      SELECT DISTINCT i_category
+      FROM item
+      WHERE i_category IS NOT NULL
+      ORDER BY i_category
+    rules_exercised: []
+    category: baseline
+    notes: DISTINCT lookup — no business rules needed.
+
+  - id: Q39
+    question: "What are the different return reasons?"
+    gold_sql: |
+      SELECT r_reason_desc FROM reason ORDER BY r_reason_sk
+    rules_exercised: []
+    category: baseline
+    notes: Simple dimension table lookup.
+
+  - id: Q40
+    question: "How many promotions are there?"
+    gold_sql: |
+      SELECT COUNT(*) AS promotion_count FROM promotion
+    rules_exercised: []
+    category: baseline
+    notes: Simple COUNT.
