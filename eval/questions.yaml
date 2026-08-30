@@ -239,7 +239,8 @@ questions:
       ),
       promo_return_rate AS (
           SELECT i.i_category,
-                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS promo_rr
+                 CAST(COUNT(CASE WHEN sr.sr_returned_date_sk IS NOT NULL THEN 1 END) AS DOUBLE)
+                 / COUNT(ss.ss_item_sk) AS promo_rr
           FROM store_sales ss
           JOIN item i ON ss.ss_item_sk = i.i_item_sk
           LEFT JOIN store_returns sr
@@ -252,7 +253,8 @@ questions:
       ),
       overall_return_rate AS (
           SELECT i.i_category,
-                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS overall_rr
+                 CAST(COUNT(CASE WHEN sr.sr_returned_date_sk IS NOT NULL THEN 1 END) AS DOUBLE)
+                 / COUNT(ss.ss_item_sk) AS overall_rr
           FROM store_sales ss
           JOIN item i ON ss.ss_item_sk = i.i_item_sk
           LEFT JOIN store_returns sr
@@ -306,7 +308,8 @@ questions:
       ),
       promo_return_rate AS (
           SELECT i.i_category,
-                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS promo_rr
+                 CAST(COUNT(CASE WHEN sr.sr_returned_date_sk IS NOT NULL THEN 1 END) AS DOUBLE)
+                 / COUNT(ss.ss_item_sk) AS promo_rr
           FROM store_sales ss
           JOIN item i ON ss.ss_item_sk = i.i_item_sk
           LEFT JOIN store_returns sr
@@ -319,7 +322,8 @@ questions:
       ),
       overall_return_rate AS (
           SELECT i.i_category,
-                 CAST(COUNT(sr.sr_item_sk) AS DOUBLE) / COUNT(ss.ss_item_sk) AS overall_rr
+                 CAST(COUNT(CASE WHEN sr.sr_returned_date_sk IS NOT NULL THEN 1 END) AS DOUBLE)
+                 / COUNT(ss.ss_item_sk) AS overall_rr
           FROM store_sales ss
           JOIN item i ON ss.ss_item_sk = i.i_item_sk
           LEFT JOIN store_returns sr
@@ -581,8 +585,9 @@ questions:
     question: "What is the overall store return rate?"
     gold_sql: |
       SELECT ROUND(
-          100.0 * COUNT(sr.sr_item_sk) / COUNT(ss.ss_item_sk), 2
-      ) AS return_rate_pct
+          CAST(COUNT(CASE WHEN sr.sr_returned_date_sk IS NOT NULL THEN 1 END) AS DOUBLE)
+          / COUNT(ss.ss_item_sk), 4
+      ) AS return_rate
       FROM store_sales ss
       LEFT JOIN store_returns sr
         ON ss.ss_item_sk = sr.sr_item_sk
@@ -591,8 +596,10 @@ questions:
     rules_exercised: [valid_sale, return_rate]
     category: governed
     notes: >
-      Tests compound join (item_sk + ticket_number). Single-key join
-      inflates the rate because different tickets can sell the same item.
+      Tests compound join (item_sk + ticket_number) and valid_return
+      counting (sr_returned_date_sk IS NOT NULL). Returns a ratio, not
+      a percentage, matching the rule text. Single-key join inflates
+      the rate because different tickets can sell the same item.
 
   - id: Q26
     question: "How many store returns were due to product defects?"

@@ -45,7 +45,11 @@ def load_profile_rules() -> str:
 
     Returns the rules as a single string ready to inject into prompts.
     If no rules.yaml exists, returns an empty string (no rules = baseline).
+    Set DISABLE_RULES=true to force an empty return (eval baseline condition).
     """
+    if os.getenv("DISABLE_RULES", "").lower() in ("true", "1", "yes"):
+        logger.info("[profile] DISABLE_RULES is set — returning empty rules")
+        return ""
     name = _active_profile_name()
     rules_path = _PROFILES_DIR / name / "rules.yaml"
     if not rules_path.exists():
@@ -78,6 +82,8 @@ def load_profile_schema_routing_rules() -> str:
     to fetch for specific KPIs/query types.
     Returns empty string if not present.
     """
+    if os.getenv("DISABLE_RULES", "").lower() in ("true", "1", "yes"):
+        return ""
     name = _active_profile_name()
     rules_path = _PROFILES_DIR / name / "rules.yaml"
     if not rules_path.exists():
@@ -97,6 +103,8 @@ def load_profile_check_rules() -> str:
     These are the checklist items the check_query node uses to validate SQL.
     Returns empty string if not present.
     """
+    if os.getenv("DISABLE_RULES", "").lower() in ("true", "1", "yes"):
+        return ""
     name = _active_profile_name()
     rules_path = _PROFILES_DIR / name / "rules.yaml"
     if not rules_path.exists():

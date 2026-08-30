@@ -118,10 +118,14 @@ rules:
 
   - name: Return Rate
     text: |
-      Return rate = (number of returned items) / (number of sold items), per
-      channel. For store: COUNT(sr_item_sk) / COUNT(ss_item_sk) using a LEFT
-      JOIN from store_sales to store_returns on BOTH keys:
+      Return rate = (number of valid returned items) / (number of valid sold
+      items), expressed as a ratio (not a percentage), per channel.
+      For store: use a LEFT JOIN from store_sales to store_returns on BOTH keys:
         ss_item_sk = sr_item_sk AND ss_ticket_number = sr_ticket_number
+      Count only returns that satisfy the Valid Return rule — i.e. only count
+      a return when sr_returned_date_sk IS NOT NULL (not just when sr_item_sk
+      IS NOT NULL from the join). The denominator counts valid sales per the
+      Valid Sale rule.
       The compound join is required — joining on item_sk alone inflates the
       rate because different tickets can sell the same item.
       Same pattern for catalog (cs_item_sk + cs_order_number = cr_item_sk +
