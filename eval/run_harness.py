@@ -102,6 +102,30 @@ def compare_results(agent_result, gold_result):
     if gold_rows.issubset(agent_rows):
         return True, f"gold is subset (agent has {len(agent_rows) - len(gold_rows)} extra rows)"
 
+    # Column-superset match: agent rows have extra columns but gold values
+    # appear as a contiguous subsequence within each agent row.
+    # E.g. gold=(12, 112M) matches agent=(2001, 12, 112M)
+    if len(agent_rows) == len(gold_rows):
+        gold_list = sorted(gold_rows)
+        agent_list = sorted(agent_rows)
+        gold_width = len(gold_list[0]) if gold_list else 0
+        agent_width = len(agent_list[0]) if agent_list else 0
+        if agent_width > gold_width > 0:
+            all_match = True
+            for gold_row, agent_row in zip(gold_list, agent_list):
+                # Check if gold_row appears as a contiguous slice in agent_row
+                found = False
+                for start in range(agent_width - gold_width + 1):
+                    if agent_row[start:start + gold_width] == gold_row:
+                        found = True
+                        break
+                if not found:
+                    all_match = False
+                    break
+            if all_match:
+                extra = agent_width - gold_width
+                return True, f"column-superset match (agent has {extra} extra column(s))"
+
     # Single-value approximate numeric match
     if len(gold_rows) == 1 and len(agent_rows) == 1:
         gold_row = list(gold_rows)[0]
