@@ -10,6 +10,11 @@ If a comma-separated list is given (e.g. ``groq,gemini``), it returns a
 and automatically falls back to the next provider on errors (rate-limit,
 network, etc.).
 
+Circuit breaker: when a provider returns a daily rate-limit error (TPD)
+multiple times consecutively, it's marked "dead" and skipped for a
+cooldown period.  This prevents wasting time cycling through exhausted
+Groq keys when Gemini (separate quota pool) is still available.
+
 Supported providers
 -------------------
 - **azure** — ``AzureChatOpenAI`` (production default)
@@ -18,6 +23,7 @@ Supported providers
 """
 import logging
 import os
+import time
 from typing import Any, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -52,11 +58,17 @@ class RoundRobinLLM(BaseChatModel):
     class Config:
         arbitrary_types_allowed = True
 
+    # Circuit-breaker constants
+    CB_FAIL_THRESHOLD: int = 2     # consecutive rate-limit failures to trip
+    CB_COOLDOWN_SECS: float = 300  # 5 min cooldown for transient limits
+
     def model_post_init(self, __context: Any) -> None:
-        """Initialise the rotation counter after Pydantic construction."""
+        """Initialise the rotation counter and circuit-breaker state."""
         super().model_post_init(__context)
         # Plain instance attrs — not Pydantic fields, so no deepcopy issues
         object.__setattr__(self, "_rr_counter", 0)
+        # Circuit breaker: {index: {"consecutive_fails": int, "dead_until": float}}
+        object.__setattr__(self, "_cb_state", {})
 
     @property
     def _llm_type(self) -> str:
@@ -66,6 +78,57 @@ class RoundRobinLLM(BaseChatModel):
         idx = self._rr_counter % len(self.models)
         object.__setattr__(self, "_rr_counter", self._rr_counter + 1)
         return idx
+
+    def _is_dead(self, idx: int) -> bool:
+        """Check if a provider is circuit-broken (too many rate-limit failures)."""
+        state = self._cb_state.get(idx)
+        if not state:
+            return False
+        if state["consecutive_fails"] >= self.CB_FAIL_THRESHOLD:
+            if time.time() < state["dead_until"]:
+                return True
+            # Cooldown expired — revive for a retry
+            self._cb_state.pop(idx, None)
+            logger.info(
+                "[round_robin] Reviving provider '%s' after cooldown",
+                self.provider_names[idx],
+            )
+        return False
+
+    def _mark_rate_limited(self, idx: int, error: Exception) -> None:
+        """Record a rate-limit failure; trip circuit if threshold reached."""
+        state = self._cb_state.get(idx, {"consecutive_fails": 0, "dead_until": 0})
+        state["consecutive_fails"] += 1
+
+        # Check if this is a daily (TPD) limit vs transient per-minute limit
+        err_str = str(error)
+        is_daily = "tokens per day" in err_str.lower() or "tpd" in err_str.lower()
+
+        if state["consecutive_fails"] >= self.CB_FAIL_THRESHOLD:
+            # Daily limits: circuit-break for 30 minutes (no point retrying sooner)
+            # Transient limits: shorter cooldown
+            cooldown = 1800 if is_daily else self.CB_COOLDOWN_SECS
+            state["dead_until"] = time.time() + cooldown
+            logger.warning(
+                "[round_robin] Circuit OPEN for '%s' — %d consecutive rate-limit "
+                "failures, dead for %ds%s",
+                self.provider_names[idx],
+                state["consecutive_fails"],
+                cooldown,
+                " (daily TPD exhausted)" if is_daily else "",
+            )
+
+        self._cb_state[idx] = state
+
+    def _mark_success(self, idx: int) -> None:
+        """Clear circuit-breaker state on success."""
+        self._cb_state.pop(idx, None)
+
+    @staticmethod
+    def _is_rate_limit_error(error: Exception) -> bool:
+        """Check if an error is a rate-limit (429) error."""
+        err_str = str(error)
+        return "429" in err_str or "rate_limit" in err_str.lower()
 
     def _generate(
         self,
@@ -81,26 +144,40 @@ class RoundRobinLLM(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=result)])
 
     def invoke(self, input, config=None, **kwargs):
-        """Round-robin invoke: try each provider in rotation, fall back on error."""
+        """Round-robin invoke with circuit breaker.
+
+        Skips providers that are circuit-broken (dead from repeated rate-limit
+        failures), tries remaining live providers in rotation order.
+        """
         start_idx = self._next_index()
         last_error = None
+        tried = 0
+        skipped_dead = 0
 
         for offset in range(len(self.models)):
             idx = (start_idx + offset) % len(self.models)
             provider = self.provider_names[idx]
+
+            # Circuit breaker: skip dead providers
+            if self._is_dead(idx):
+                skipped_dead += 1
+                continue
+
             llm = self.models[idx]
+            tried += 1
             try:
                 result = llm.invoke(input, config=config, **kwargs)
-                if offset > 0:
+                self._mark_success(idx)
+                if tried > 1:
                     logger.info(
-                        "[round_robin] Succeeded on fallback provider '%s' "
-                        "(primary '%s' failed)",
+                        "[round_robin] Succeeded on fallback provider '%s'",
                         provider,
-                        self.provider_names[start_idx],
                     )
                 return result
             except Exception as e:
                 last_error = e
+                if self._is_rate_limit_error(e):
+                    self._mark_rate_limited(idx, e)
                 logger.warning(
                     "[round_robin] Provider '%s' failed: %s — trying next",
                     provider,
@@ -108,11 +185,12 @@ class RoundRobinLLM(BaseChatModel):
                 )
                 continue
 
-        # All providers failed
+        # All providers either dead or failed
+        live_count = len(self.models) - skipped_dead
         logger.error(
-            "[round_robin] All %d providers failed. Last error: %s",
-            len(self.models),
-            last_error,
+            "[round_robin] All providers exhausted. %d tried, %d circuit-broken. "
+            "Last error: %s",
+            tried, skipped_dead, last_error,
         )
         raise last_error
 

@@ -3,10 +3,18 @@
 Evaluation Harness — runs the 40-question set through the agent under
 two conditions (baseline + flat_rules) and scores against gold SQL.
 
+Conditions are INTERLEAVED per question: for each question, both baseline
+and flat_rules run before moving to the next, so rate limits affect both
+conditions equally.
+
+RESUMABLE: use --resume <results.json> to skip questions that already have
+clean (non-rate-limited) results, retrying only failed/missing ones.
+
 Usage:
-    python eval/run_harness.py                     # full 40 questions
-    python eval/run_harness.py --subset 5          # first N questions only
-    python eval/run_harness.py --questions Q01,Q03  # specific questions
+    python eval/run_harness.py                         # full 40 questions
+    python eval/run_harness.py --subset 5              # first N questions only
+    python eval/run_harness.py --questions Q01,Q03      # specific questions
+    python eval/run_harness.py --resume eval/results/prev_results.json
 """
 import argparse
 import decimal
@@ -53,7 +61,6 @@ def normalize_value(v):
     if isinstance(v, (int, float)):
         return float(v)
     if isinstance(v, str):
-        # Try to parse as number
         try:
             return float(v)
         except (ValueError, TypeError):
@@ -78,10 +85,7 @@ def normalize_rows(rows):
 
 
 def compare_results(agent_result, gold_result):
-    """Compare agent result vs gold SQL result, order-independently and type-tolerantly.
-
-    Returns (match: bool, details: str).
-    """
+    """Compare agent result vs gold SQL result, order-independently and type-tolerantly."""
     if not agent_result and not gold_result:
         return True, "both empty"
     if not agent_result:
@@ -95,11 +99,10 @@ def compare_results(agent_result, gold_result):
     if agent_rows == gold_rows:
         return True, "exact match"
 
-    # Check if gold is a subset (agent returned extra rows but got the key ones)
     if gold_rows.issubset(agent_rows):
         return True, f"gold is subset (agent has {len(agent_rows) - len(gold_rows)} extra rows)"
 
-    # For single-value results, check approximate numeric match
+    # Single-value approximate numeric match
     if len(gold_rows) == 1 and len(agent_rows) == 1:
         gold_row = list(gold_rows)[0]
         agent_row = list(agent_rows)[0]
@@ -107,7 +110,7 @@ def compare_results(agent_result, gold_result):
             g, a = gold_row[0], agent_row[0]
             if isinstance(g, float) and isinstance(a, float) and g != 0:
                 pct_diff = abs(g - a) / abs(g)
-                if pct_diff < 0.001:  # within 0.1%
+                if pct_diff < 0.001:
                     return True, f"numeric match within 0.1% (diff={pct_diff:.6f})"
 
     return False, f"mismatch: agent={sorted(agent_rows)[:3]}... gold={sorted(gold_rows)[:3]}..."
@@ -118,7 +121,6 @@ def compare_results(agent_result, gold_result):
 def extract_agent_sql(state):
     """Extract the SQL query the agent generated from its message history."""
     messages = state.get("messages", [])
-    # Walk backwards to find the last sql_db_query tool call
     for msg in reversed(messages):
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
@@ -144,13 +146,35 @@ def extract_token_usage(state):
     return None
 
 
+# ─── Resumability helpers ────────────────────────────────────────────────────
+
+def is_clean_result(result):
+    """Check if a result is clean (not rate-limited, not empty from errors)."""
+    if not result:
+        return False
+    # Rate-limited
+    if result.get("agent_error") and ("429" in str(result["agent_error"]) or
+                                       "rate_limit" in str(result["agent_error"]).lower()):
+        return False
+    # No results due to fast failure (rate-limit artifact, not genuine empty result)
+    if (result.get("comparison") == "agent returned no results"
+            and result.get("latency_s", 0) < 5
+            and not result.get("agent_sql")):
+        return False
+    return True
+
+
+def load_previous_results(path):
+    """Load previous results and return a dict keyed by (question_id, condition)."""
+    with open(path, "r", encoding="utf-8") as f:
+        results = json.load(f)
+    return {(r["id"], r["condition"]): r for r in results}
+
+
 # ─── Run a single question under one condition ──────────────────────────────
 
 def run_single(question, agent, db, condition_name):
-    """Run one question through the agent and score against gold SQL.
-
-    Returns a result dict.
-    """
+    """Run one question through the agent and score against gold SQL."""
     qid = question["id"]
     gold_sql = question["gold_sql"].strip()
 
@@ -183,9 +207,7 @@ def run_single(question, agent, db, condition_name):
         result["token_usage"] = extract_token_usage(final_state)
         result["agent_error"] = None
 
-        # Extract agent's raw results (already executed by run_query node)
         raw = final_state.get("raw_results") or {}
-        cols = raw.get("columns", [])
         rows = raw.get("rows", [])
         agent_result = [tuple(row) for row in rows] if rows else []
 
@@ -201,8 +223,6 @@ def run_single(question, agent, db, condition_name):
     # 2. Execute gold SQL
     try:
         gold_raw = db.run(gold_sql)
-        # db.run returns a string repr of list of tuples — eval it
-        # Need Decimal in scope since DuckDB returns Decimal for numeric types
         if isinstance(gold_raw, str):
             gold_result = eval(gold_raw, {"Decimal": decimal.Decimal, "__builtins__": {}})
         else:
@@ -218,7 +238,6 @@ def run_single(question, agent, db, condition_name):
     result["pass"] = match
     result["comparison"] = details
 
-    # Previews for report
     gold_str = str(gold_result)
     result["gold_result_preview"] = gold_str[:200] if len(gold_str) > 200 else gold_str
     agent_str = str(agent_result)
@@ -230,7 +249,6 @@ def run_single(question, agent, db, condition_name):
 # ─── Build report ────────────────────────────────────────────────────────────
 
 def json_serializable(obj):
-    """Make objects JSON-serializable."""
     if isinstance(obj, decimal.Decimal):
         return float(obj)
     if isinstance(obj, set):
@@ -239,7 +257,7 @@ def json_serializable(obj):
 
 
 def build_report(results, timestamp):
-    """Build markdown report and raw JSON from results."""
+    """Build markdown report."""
     conditions = {}
     for r in results:
         cond = r["condition"]
@@ -251,27 +269,39 @@ def build_report(results, timestamp):
     lines.append(f"# Evaluation Report — {timestamp}")
     lines.append("")
 
-    # Overall accuracy per condition
+    # Rate-limit warnings
+    for cond, cond_results in conditions.items():
+        rate_limited = sum(1 for r in cond_results if not is_clean_result(r))
+        if rate_limited:
+            lines.append(f"> [!WARNING]")
+            lines.append(f"> **{cond}**: {rate_limited}/{len(cond_results)} results are rate-limited artifacts")
+            lines.append("")
+
+    # Overall accuracy
     lines.append("## Overall Accuracy")
     lines.append("")
-    lines.append("| Condition | Total | Pass | Fail | Accuracy |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| Condition | Total | Clean | Pass | Fail | Rate-Limited | Clean Accuracy |")
+    lines.append("|---|---|---|---|---|---|---|")
     for cond, cond_results in conditions.items():
         total = len(cond_results)
-        passed = sum(1 for r in cond_results if r["pass"])
-        failed = total - passed
-        acc = f"{100 * passed / total:.1f}%" if total else "N/A"
-        lines.append(f"| {cond} | {total} | {passed} | {failed} | {acc} |")
+        clean = [r for r in cond_results if is_clean_result(r)]
+        rate_limited = total - len(clean)
+        clean_passed = sum(1 for r in clean if r["pass"])
+        clean_failed = len(clean) - clean_passed
+        clean_acc = f"{100 * clean_passed / len(clean):.1f}%" if clean else "N/A"
+        lines.append(f"| {cond} | {total} | {len(clean)} | {clean_passed} | {clean_failed} | {rate_limited} | {clean_acc} |")
     lines.append("")
 
-    # Per-category breakdown
-    lines.append("## Accuracy by Category")
+    # Per-category breakdown (clean only)
+    lines.append("## Accuracy by Category (clean results only)")
     lines.append("")
-    lines.append("| Condition | Category | Total | Pass | Fail | Accuracy |")
+    lines.append("| Condition | Category | Clean | Pass | Fail | Accuracy |")
     lines.append("|---|---|---|---|---|---|")
     for cond, cond_results in conditions.items():
         cats = {}
         for r in cond_results:
+            if not is_clean_result(r):
+                continue
             cat = r["category"]
             if cat not in cats:
                 cats[cat] = {"pass": 0, "fail": 0}
@@ -295,32 +325,37 @@ def build_report(results, timestamp):
     for r in sorted(results, key=lambda x: (x["id"], x["condition"])):
         if r["category"] == "ambiguous":
             sql_preview = r.get("agent_sql", "")[:80].replace("|", "\\|").replace("\n", " ")
-            mark = "PASS" if r["pass"] else "FAIL"
+            if not is_clean_result(r):
+                mark = "RATE-LIM"
+            elif r["pass"]:
+                mark = "PASS"
+            else:
+                mark = "FAIL"
             lines.append(f"| {r['id']} | {r['ambiguous_rule']} | {r['condition']} | {mark} | `{sql_preview}` |")
     lines.append("")
 
-    # Latency and tokens
+    # Performance
     lines.append("## Performance")
     lines.append("")
     for cond, cond_results in conditions.items():
-        latencies = [r["latency_s"] for r in cond_results if r.get("latency_s")]
+        clean = [r for r in cond_results if is_clean_result(r)]
+        latencies = [r["latency_s"] for r in clean if r.get("latency_s")]
         avg_lat = sum(latencies) / len(latencies) if latencies else 0
-
-        token_totals = [r["token_usage"]["total_tokens"] for r in cond_results
+        token_totals = [r["token_usage"]["total_tokens"] for r in clean
                         if r.get("token_usage") and r["token_usage"]]
         if token_totals:
             avg_tokens = sum(token_totals) / len(token_totals)
             lines.append(f"**{cond}**: avg latency = {avg_lat:.1f}s, "
-                         f"avg tokens = {avg_tokens:.0f} ({len(token_totals)}/{len(cond_results)} reported)")
+                         f"avg tokens = {avg_tokens:.0f} ({len(token_totals)}/{len(clean)} reported)")
         else:
             lines.append(f"**{cond}**: avg latency = {avg_lat:.1f}s, token usage not available")
     lines.append("")
 
-    # Failed questions detail
-    lines.append("## Failed Questions")
+    # Failed questions detail (clean only)
+    lines.append("## Failed Questions (clean results only)")
     lines.append("")
     for r in results:
-        if not r["pass"]:
+        if not r["pass"] and is_clean_result(r):
             lines.append(f"### {r['id']} [{r['condition']}] — {r['question']}")
             lines.append(f"- **Category**: {r['category']}")
             if r.get("agent_error"):
@@ -343,6 +378,8 @@ def main():
                         help="Run only the first N questions (0 = all)")
     parser.add_argument("--questions", type=str, default="",
                         help="Comma-separated question IDs to run (e.g. Q01,Q03,Q35)")
+    parser.add_argument("--resume", type=str, default="",
+                        help="Path to previous results JSON to resume from")
     args = parser.parse_args()
 
     # Load questions
@@ -358,39 +395,77 @@ def main():
     elif args.subset > 0:
         questions = questions[:args.subset]
 
-    logger.info("Running %d questions x 2 conditions = %d agent invocations",
-                len(questions), len(questions) * 2)
+    # Load previous results for resumability
+    previous = {}
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.is_absolute():
+            resume_path = ROOT / resume_path
+        if resume_path.exists():
+            previous = load_previous_results(str(resume_path))
+            logger.info("Loaded %d previous results from %s", len(previous), resume_path)
+        else:
+            logger.warning("Resume file not found: %s — starting fresh", resume_path)
 
-    # Get shared DB for gold SQL execution
-    db = get_db()
-
-    all_results = []
     conditions = [
         ("baseline", {"DISABLE_RULES": "true"}),
         ("flat_rules", {"DISABLE_RULES": ""}),
     ]
 
+    # Pre-build agents for both conditions
+    agents = {}
     for cond_name, env_overrides in conditions:
-        logger.info("=" * 60)
-        logger.info("CONDITION: %s", cond_name)
-        logger.info("=" * 60)
-
-        # Set env vars for this condition
         for k, v in env_overrides.items():
             os.environ[k] = v
+        agents[cond_name], _ = build_agent()
+        logger.info("Built agent for condition '%s'", cond_name)
 
-        # Rebuild agent for this condition (picks up DISABLE_RULES)
-        agent, _ = build_agent()
+    # Count what needs running
+    to_run = []
+    for q in questions:
+        for cond_name, _ in conditions:
+            key = (q["id"], cond_name)
+            if key in previous and is_clean_result(previous[key]):
+                continue
+            to_run.append((q, cond_name))
 
-        for i, q in enumerate(questions):
-            logger.info("[%s] %d/%d  %s: %s",
+    skipped = len(questions) * len(conditions) - len(to_run)
+    logger.info(
+        "Running %d invocations (%d skipped from previous clean results)",
+        len(to_run), skipped,
+    )
+
+    db = get_db()
+    all_results = []
+
+    # Carry forward clean previous results
+    for key, result in previous.items():
+        if is_clean_result(result):
+            if any(q["id"] == key[0] for q in questions):
+                all_results.append(result)
+
+    # INTERLEAVED: for each question, run both conditions before moving on
+    for i, q in enumerate(questions):
+        for cond_name, env_overrides in conditions:
+            key = (q["id"], cond_name)
+
+            if key in previous and is_clean_result(previous[key]):
+                continue
+
+            for k, v in env_overrides.items():
+                os.environ[k] = v
+
+            agent = agents[cond_name]
+
+            logger.info("[%s] Q %d/%d  %s: %s",
                         cond_name, i + 1, len(questions), q["id"], q["question"][:60])
             try:
                 result = run_single(q, agent, db, cond_name)
                 mark = "PASS" if result["pass"] else "FAIL"
-                logger.info("[%s] %s  %s  (%.1fs)  %s",
-                            cond_name, q["id"], mark, result["latency_s"],
-                            result["comparison"][:80])
+                clean_mark = "" if is_clean_result(result) else " [RATE-LIM]"
+                logger.info("[%s] %s  %s%s  (%.1fs)  %s",
+                            cond_name, q["id"], mark, clean_mark,
+                            result["latency_s"], result["comparison"][:80])
             except Exception as e:
                 logger.error("[%s] %s  ERROR: %s", cond_name, q["id"], e)
                 result = {
@@ -407,31 +482,42 @@ def main():
     # Clean up env
     os.environ.pop("DISABLE_RULES", None)
 
+    # Deduplicate: keep newest result for each (id, condition) pair
+    seen = {}
+    for r in reversed(all_results):
+        key = (r["id"], r["condition"])
+        if key not in seen:
+            seen[key] = r
+    all_results = sorted(seen.values(), key=lambda r: (r["id"], r["condition"]))
+
     # Generate report
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = ROOT / "eval" / "results"
     results_dir.mkdir(exist_ok=True)
 
-    # Write raw JSON
     json_path = results_dir / f"{timestamp}_results.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, default=json_serializable)
     logger.info("Raw results: %s", json_path)
 
-    # Write markdown report
     report = build_report(all_results, timestamp)
     report_path = results_dir / f"{timestamp}_report.md"
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)
     logger.info("Report: %s", report_path)
 
-    # Print summary to stdout
+    # Print summary
     print("\n" + "=" * 60)
     for cond_name, _ in conditions:
         cond_results = [r for r in all_results if r["condition"] == cond_name]
-        passed = sum(1 for r in cond_results if r["pass"])
-        total = len(cond_results)
-        print(f"  {cond_name}: {passed}/{total} ({100*passed/total:.1f}%)" if total else f"  {cond_name}: N/A")
+        clean = [r for r in cond_results if is_clean_result(r)]
+        passed = sum(1 for r in clean if r["pass"])
+        total = len(clean)
+        rate_lim = len(cond_results) - total
+        summary = f"  {cond_name}: {passed}/{total} ({100*passed/total:.1f}%)" if total else f"  {cond_name}: N/A"
+        if rate_lim:
+            summary += f"  [{rate_lim} rate-limited]"
+        print(summary)
     print("=" * 60)
 
 
